@@ -2,7 +2,7 @@ name: iptv-merge-manager
 
 services:
   iptv-merge-manager:
-    image: ghcr.io/YOUR_GITHUB_USERNAME/iptv-merge-manager:0.2.0
+    image: ghcr.io/kody-r/iptv-merge-manager:0.2.0
     container_name: iptv-merge-manager
     restart: unless-stopped
     ports:
@@ -22,14 +22,14 @@ x-casaos:
   index: /
   port_map: "8080"
   scheme: http
-  icon: https://raw.githubusercontent.com/YOUR_GITHUB_USERNAME/iptv-merge-manager/main/casaos/icon.svg
+  icon: https://raw.githubusercontent.com/kody-r/iptv-merge-manager/main/casaos/icon.svg
   title:
     en_US: IPTV Merge Manager
   tagline:
     en_US: Curate multiple IPTV playlists and XMLTV guides into one lineup.
   description:
     en_US: Merge multiple M3U/M3U8 sources and optional XMLTV guides, select individual channels, sort the master lineup, assign channel numbers, and publish a single M3U and XMLTV feed for Jellyfin or other IPTV clients.
-  author: YOUR_GITHUB_USERNAME
+  author: kody-r
   developer: IPTV Merge Manager
   category: Media
   architectures:
