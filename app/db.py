@@ -70,6 +70,14 @@ def init_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_channels_selected ON channels(selected, is_active);
             CREATE INDEX IF NOT EXISTS idx_channels_tvg ON channels(tvg_id);
 
+            CREATE TABLE IF NOT EXISTS lineup_groups (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                number_start INTEGER NOT NULL DEFAULT 1,
+                number_increment INTEGER NOT NULL DEFAULT 1
+            );
+
             CREATE TABLE IF NOT EXISTS refresh_log (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 source_id INTEGER REFERENCES sources(id) ON DELETE SET NULL,
@@ -80,6 +88,16 @@ def init_db() -> None:
             );
             """
         )
+        # v0.2 additive migrations; safe on existing v0.1.x databases.
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(channels)").fetchall()}
+        for name, ddl in {
+            "custom_name": "TEXT",
+            "custom_group": "TEXT",
+            "custom_tvg_id": "TEXT",
+            "custom_logo": "TEXT",
+        }.items():
+            if name not in cols:
+                conn.execute(f"ALTER TABLE channels ADD COLUMN {name} {ddl}")
 
 
 def rows_to_dicts(rows: Iterable[sqlite3.Row]) -> list[dict]:

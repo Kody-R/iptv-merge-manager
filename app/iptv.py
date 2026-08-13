@@ -84,7 +84,7 @@ def parse_m3u(text: str) -> list[dict]:
 
 
 async def fetch_bytes(url: str) -> bytes:
-    headers = {"User-Agent": "IPTV-Merge-Manager/0.1.1"}
+    headers = {"User-Agent": "IPTV-Merge-Manager/0.2.0"}
     timeout = httpx.Timeout(60.0, connect=20.0)
     async with httpx.AsyncClient(follow_redirects=True, timeout=timeout, headers=headers) as client:
         response = await client.get(url)
@@ -246,17 +246,21 @@ def generate_master_m3u() -> int:
     lines = ["#EXTM3U"]
     for row in rows:
         d = dict(row)
+        name = d.get("custom_name") or d.get("name")
+        tvg_id = d.get("custom_tvg_id") or d.get("tvg_id")
+        logo = d.get("custom_logo") or d.get("logo")
+        group_title = d.get("custom_group") or d.get("group_title")
         attrs = []
-        if d.get("tvg_id"):
-            attrs.append(f'tvg-id="{m3u_escape(d["tvg_id"])}"')
-        attrs.append(f'tvg-name="{m3u_escape(d["name"])}"')
-        if d.get("logo"):
-            attrs.append(f'tvg-logo="{m3u_escape(d["logo"])}"')
-        if d.get("group_title"):
-            attrs.append(f'group-title="{m3u_escape(d["group_title"])}"')
+        if tvg_id:
+            attrs.append(f'tvg-id="{m3u_escape(tvg_id)}"')
+        attrs.append(f'tvg-name="{m3u_escape(name)}"')
+        if logo:
+            attrs.append(f'tvg-logo="{m3u_escape(logo)}"')
+        if group_title:
+            attrs.append(f'group-title="{m3u_escape(group_title)}"')
         if d.get("channel_number") is not None:
             attrs.append(f'tvg-chno="{d["channel_number"]}"')
-        lines.append(f"#EXTINF:-1 {' '.join(attrs)},{d['name']}")
+        lines.append(f"#EXTINF:-1 {' '.join(attrs)},{name}")
         lines.append(d["stream_url"])
 
     (OUTPUT_DIR / "master.m3u").write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -282,7 +286,7 @@ def generate_master_xml() -> tuple[int, int]:
     with connect() as conn:
         rows = conn.execute(
             """
-            SELECT c.source_id, c.tvg_id
+            SELECT c.source_id, COALESCE(NULLIF(c.custom_tvg_id,''), c.tvg_id) AS tvg_id
               FROM channels c
               JOIN sources s ON s.id=c.source_id
              WHERE c.selected=1 AND c.is_active=1 AND s.enabled=1
@@ -301,7 +305,7 @@ def generate_master_xml() -> tuple[int, int]:
 
     with etree.xmlfile(str(out), encoding="utf-8") as xf:
         xf.write_declaration()
-        with xf.element("tv", {"generator-info-name": "IPTV Merge Manager v0.1.1"}):
+        with xf.element("tv", {"generator-info-name": "IPTV Merge Manager v0.2.0"}):
             for source_id, ids in by_source.items():
                 xml_path = CACHE_DIR / f"source_{source_id}.xml"
                 for elem in _iter_xml_matches(xml_path, ids, "channel") or []:

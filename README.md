@@ -1,4 +1,4 @@
-# IPTV Merge Manager v0.1.1
+# IPTV Merge Manager v0.2.0
 
 A self-hosted Docker application that combines multiple IPTV M3U/M3U8 channel lists and optional XMLTV guides into one curated master lineup.
 
@@ -32,8 +32,8 @@ A self-hosted Docker application that combines multiple IPTV M3U/M3U8 channel li
 ## Install
 
 ```bash
-unzip iptv-merge-manager-v0.1.1.zip
-cd iptv-merge-manager-v0.1.1
+unzip iptv-merge-manager-v0.2.0.zip
+cd iptv-merge-manager-v0.2.0
 docker compose up -d --build
 ```
 
@@ -55,7 +55,7 @@ For Jellyfin, add the M3U URL as an M3U tuner and the XML URL as an XMLTV guide 
 
 ## CasaOS / GitHub deployment
 
-v0.1.1 includes a CasaOS Compose template and an automated GitHub Container Registry workflow. See `GITHUB-CASAOS.md` for the recommended setup. Once published, CasaOS can pull the prebuilt image from GHCR rather than building the application locally.
+v0.2.0 includes a CasaOS Compose template and an automated GitHub Container Registry workflow. See `GITHUB-CASAOS.md` for the recommended setup. Once published, CasaOS can pull the prebuilt image from GHCR rather than building the application locally.
 
 Files added for this workflow:
 
@@ -109,7 +109,7 @@ environment:
   REFRESH_HOURS: "4"
 ```
 
-Supported integer values should divide sensibly into a 24-hour day. v0.1.1 is designed around the default four-hour cycle.
+Supported integer values should divide sensibly into a 24-hour day. v0.2.0 is designed around the default four-hour cycle.
 
 ## Source refresh safety
 
@@ -141,15 +141,15 @@ The generated M3U includes `tvg-id`, `tvg-name`, `tvg-logo`, `group-title`, and 
 
 ## XMLTV behavior
 
-v0.1.1 associates a selected channel with XMLTV from its own source using `tvg-id`. Only matching `<channel>` and `<programme>` records are copied into `master.xml`.
+v0.2.0 associates a selected channel with XMLTV from its own source using `tvg-id`. Only matching `<channel>` and `<programme>` records are copied into `master.xml`.
 
-Channels without a TVG-ID can still be streamed in `master.m3u`, but they will not contribute guide entries to `master.xml` in v0.1.1.
+Channels without a TVG-ID can still be streamed in `master.m3u`, but they will not contribute guide entries to `master.xml` in v0.2.0.
 
 Cross-provider manual EPG mapping is intentionally reserved for a later release.
 
 ## Security note
 
-v0.1.1 does not include login/authentication. It is intended for a trusted home LAN. Do not expose port 8080 directly to the public Internet without placing it behind your own authenticated reverse proxy or VPN.
+v0.2.0 does not include login/authentication. It is intended for a trusted home LAN. Do not expose port 8080 directly to the public Internet without placing it behind your own authenticated reverse proxy or VPN.
 
 Also note that source URLs are stored in the local SQLite database. If a provider embeds credentials/tokens in its URL, protect the `data` directory accordingly.
 
@@ -186,3 +186,13 @@ docker compose up -d --build
 ```
 
 The persistent `data` and `output` folders remain on the host.
+
+## v0.2.0 highlights
+
+- Channel metadata overrides
+- Bulk channel operations
+- Custom lineup groups
+- Group-based auto numbering
+- EPG match suggestions
+- Expanded dashboard
+- Configuration backup and restore
