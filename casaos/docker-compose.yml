@@ -1,0 +1,41 @@
+name: iptv-merge-manager
+
+services:
+  iptv-merge-manager:
+    image: ghcr.io/YOUR_GITHUB_USERNAME/iptv-merge-manager:0.1.1
+    container_name: iptv-merge-manager
+    restart: unless-stopped
+    ports:
+      - target: 8080
+        published: "8080"
+        protocol: tcp
+    environment:
+      TZ: America/New_York
+      REFRESH_HOURS: "4"
+    volumes:
+      - /DATA/AppData/iptv-merge-manager/data:/app/data
+      - /DATA/AppData/iptv-merge-manager/output:/app/output
+
+x-casaos:
+  id: com.github.iptv-merge-manager
+  main: iptv-merge-manager
+  index: /
+  port_map: "8080"
+  scheme: http
+  icon: https://raw.githubusercontent.com/YOUR_GITHUB_USERNAME/iptv-merge-manager/main/casaos/icon.svg
+  title:
+    en_US: IPTV Merge Manager
+  tagline:
+    en_US: Curate multiple IPTV playlists and XMLTV guides into one lineup.
+  description:
+    en_US: Merge multiple M3U/M3U8 sources and optional XMLTV guides, select individual channels, sort the master lineup, assign channel numbers, and publish a single M3U and XMLTV feed for Jellyfin or other IPTV clients.
+  author: YOUR_GITHUB_USERNAME
+  developer: IPTV Merge Manager
+  category: Media
+  architectures:
+    - amd64
+    - arm64
+  version: "0.1.1"
+  update_at: "2026-08-12"
+  release_notes:
+    en_US: CasaOS packaging, GHCR publishing workflow, multi-architecture image builds, persistent CasaOS paths, and Docker health checking.
