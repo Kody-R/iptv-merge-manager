@@ -1,6 +1,6 @@
 FROM python:3.12-slim
 
-ARG VERSION=0.3.0
+ARG VERSION=0.3.1
 LABEL org.opencontainers.image.title="IPTV Merge Manager" \
       org.opencontainers.image.description="Curate and merge multiple IPTV M3U/M3U8 playlists and XMLTV guides" \
       org.opencontainers.image.version="${VERSION}" \

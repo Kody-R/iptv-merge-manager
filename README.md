@@ -1,4 +1,4 @@
-# IPTV Merge Manager v0.3.0
+# IPTV Merge Manager v0.3.1
 
 A self-hosted Docker application that combines multiple IPTV M3U/M3U8 channel lists and optional XMLTV guides into one curated master lineup.
 
@@ -24,6 +24,42 @@ A self-hosted Docker application that combines multiple IPTV M3U/M3U8 channel li
 - XMLTV output filtered to selected TVG IDs
 - Refresh history in the web UI
 
+
+## v0.3.1 Adaptive HLS Variant Lock
+
+v0.3.1 adds an opt-in playback-reliability path for adaptive HLS channels that expose multiple quality renditions and behave poorly when Jellyfin/FFmpeg opens the full master playlist.
+
+For an enabled channel, IPTV Merge Manager now:
+
+1. Keeps the provider's stable/original stream URL in SQLite.
+2. Resolves the current upstream HLS master when playback starts.
+3. Selects one rendition (720p maximum by default).
+4. Fetches only that rendition's small media playlist.
+5. Rewrites relative segment/key URIs to absolute upstream CDN URLs.
+6. Returns the rewritten playlist to Jellyfin.
+7. Leaves all `.ts`/media traffic direct between Jellyfin and the provider/CDN.
+
+This prevents Jellyfin from seeing several video/audio programs at the same time while keeping IPTV Merge Manager's CPU, RAM, and network load very small. If a master uses a separate HLS audio group, v0.3.1 returns a one-variant mini-master so that audio group is retained.
+
+### Enable it for a problem channel
+
+Open **Channel Browser → Edit** for the channel, then:
+
+- Check **Enable HLS Variant Lock for this channel**.
+- Leave **Maximum HLS quality** at **Use global default** (720p initially), or choose another cap.
+- Click **Analyze HLS** to verify available variants and which one will be selected.
+- Save the channel.
+
+You can also enable/disable variant lock or assign 720p/540p/360p caps to multiple checked channels using the Channel Browser bulk-action menu.
+
+The **Adaptive HLS Variant Lock** dashboard panel controls the global service, default quality cap, short master-manifest cache, and runtime request/error counters.
+
+### Important behavior
+
+Variant lock is **off per channel by default** after upgrading. Existing streams remain unchanged until you enable it for a channel. This avoids adding an HLS probe to every IPTV stream in a large lineup.
+
+The generated `master.m3u` uses the same host/port Jellyfin used to request the playlist when expanding internal variant-lock URLs, so normal direct-IP and CasaOS LAN usage do not require a hard-coded server address.
+
 ## Requirements
 
 - Docker Engine
@@ -32,8 +68,8 @@ A self-hosted Docker application that combines multiple IPTV M3U/M3U8 channel li
 ## Install
 
 ```bash
-unzip iptv-merge-manager-v0.3.0.zip
-cd iptv-merge-manager-v0.3.0
+unzip iptv-merge-manager-v0.3.1.zip
+cd iptv-merge-manager-v0.3.1
 docker compose up -d --build
 ```
 
@@ -187,7 +223,7 @@ docker compose up -d --build
 
 The persistent `data` and `output` folders remain on the host.
 
-## v0.3.0 highlights
+## v0.3.1 highlights
 
 - Channel metadata overrides
 - Bulk channel operations
@@ -196,6 +232,11 @@ The persistent `data` and `output` folders remain on the host.
 - EPG match suggestions
 - Expanded dashboard
 - Configuration backup and restore
+- Per-channel adaptive HLS variant lock
+- 720p default rendition cap with per-channel overrides
+- HLS analyzer and runtime proxy counters
+- Dynamic provider-manifest re-resolution
+- Direct-to-CDN media segment delivery
 
 ## v0.3.0 low-memory architecture
 

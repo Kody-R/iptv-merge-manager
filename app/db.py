@@ -115,6 +115,8 @@ def init_db() -> None:
             'custom_group': 'TEXT',
             'custom_tvg_id': 'TEXT',
             'custom_logo': 'TEXT',
+            'hls_proxy_enabled': 'INTEGER NOT NULL DEFAULT 0',
+            'hls_max_height': 'INTEGER',
         }.items():
             if name not in cols:
                 conn.execute(f'ALTER TABLE channels ADD COLUMN {name} {ddl}')
@@ -125,6 +127,9 @@ def init_db() -> None:
 
         conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('resource_profile','low-memory')")
         conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('history_limit','10')")
+        conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('hls_proxy_enabled','1')")
+        conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('hls_proxy_default_height','720')")
+        conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('hls_proxy_cache_seconds','15')")
 
 
 def get_setting(key: str, default: str) -> str:

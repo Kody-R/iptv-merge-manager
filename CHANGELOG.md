@@ -1,5 +1,22 @@
 # Changelog
 
+## v0.3.1
+
+Adaptive-HLS playback reliability patch:
+
+- Added opt-in per-channel HLS Variant Lock for Jellyfin/FFmpeg playback issues.
+- Default variant cap is 720p, with Highest/1080p/720p/540p/360p controls.
+- Added HLS master analyzer in the channel editor.
+- Added bulk enable/disable and quality-cap actions.
+- Resolves dynamic provider master playlists at playback time instead of storing expiring rendition URLs.
+- For multiplexed A/V variants, serves the selected media playlist directly so FFmpeg sees only one program.
+- Rewrites segment/key URIs to absolute upstream URLs; video traffic does not traverse IPTV Merge Manager.
+- Preserves separate HLS audio groups using a one-variant mini-master when necessary.
+- Retries master resolution once when a selected rendition returns 401/403/404/410.
+- Adds a short configurable manifest cache (15 seconds by default) and proxy runtime counters.
+- `master.m3u` expands internal proxy URLs from the request host, avoiding a hard-coded server IP.
+- Preserves all v0.3.0 low-memory worker, disk-backed XMLTV, pagination, and resource-profile behavior.
+
 ## v0.3.0
 
 Resource-optimization release:

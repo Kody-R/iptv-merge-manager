@@ -2,7 +2,7 @@ name: iptv-merge-manager
 
 services:
   iptv-merge-manager:
-    image: ghcr.io/kody-r/iptv-merge-manager:0.3.0
+    image: ghcr.io/kody-r/iptv-merge-manager:0.3.1
     container_name: iptv-merge-manager
     restart: unless-stopped
     ports:
@@ -35,7 +35,7 @@ x-casaos:
   architectures:
     - amd64
     - arm64
-  version: "0.3.0"
-  update_at: "2026-08-12"
+  version: "0.3.1"
+  update_at: "2026-08-14"
   release_notes:
-    en_US: v0.3 low-memory workers, streaming M3U/XMLTV processing, pagination, resource profiles/monitoring, compressed XMLTV output, and last-known-good refresh protection.
+    en_US: v0.3.1 adds an opt-in adaptive HLS variant-lock proxy for unstable Jellyfin channels, 720p default selection, HLS analysis, dynamic manifest re-resolution, and direct-to-CDN segment delivery while preserving v0.3 low-memory behavior.
