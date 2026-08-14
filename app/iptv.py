@@ -15,6 +15,7 @@ import httpx
 from lxml import etree
 
 from .db import connect, get_setting
+from .hls_proxy import effective_hls_mode
 
 DATA_DIR = Path('/app/data')
 CACHE_DIR = DATA_DIR / 'cache'
@@ -79,7 +80,7 @@ def iter_m3u(path: Path) -> Iterator[dict]:
 
 
 async def _download_to_file(url: str, destination: Path) -> None:
-    headers = {'User-Agent': 'IPTV-Merge-Manager/0.3.1'}
+    headers = {'User-Agent': 'IPTV-Merge-Manager/0.3.2'}
     timeout = httpx.Timeout(90.0, connect=20.0)
     destination.parent.mkdir(parents=True, exist_ok=True)
     tmp = destination.with_suffix(destination.suffix + '.download')
@@ -300,10 +301,12 @@ def generate_master_m3u() -> int:
     tmp = OUTPUT_DIR / 'master.m3u.tmp'
     count = 0
     global_proxy_enabled = get_setting('hls_proxy_enabled', '1') == '1'
+    global_mode = get_setting('hls_proxy_default_mode', 'direct')
     with connect() as conn, tmp.open('w', encoding='utf-8', newline='\n') as fh:
         fh.write('#EXTM3U\n')
         cursor = conn.execute(
-            """SELECT c.* FROM channels c JOIN sources s ON s.id=c.source_id
+            """SELECT c.*,s.hls_mode source_hls_mode,s.hls_max_height source_hls_max_height
+               FROM channels c JOIN sources s ON s.id=c.source_id
                WHERE c.selected=1 AND c.is_active=1 AND s.enabled=1
                ORDER BY c.sort_order,c.id"""
         )
@@ -319,7 +322,8 @@ def generate_master_m3u() -> int:
             if group_title: attrs.append(f'group-title="{m3u_escape(group_title)}"')
             if row['channel_number'] is not None: attrs.append(f'tvg-chno="{row["channel_number"]}"')
             stream_url = row['stream_url']
-            if global_proxy_enabled and row['hls_proxy_enabled']:
+            mode = effective_hls_mode(row['hls_mode'], row['source_hls_mode'], global_mode)
+            if global_proxy_enabled and mode != 'direct':
                 # The output endpoint expands this token to the exact scheme/host/port Jellyfin used.
                 stream_url = f'__IPTVMM_BASE__/hls/channel/{row["id"]}/index.m3u8'
             fh.write(f"#EXTINF:-1 {' '.join(attrs)},{name}\n{stream_url}\n")
@@ -350,7 +354,7 @@ def generate_master_xml() -> tuple[int, int]:
 
     with etree.xmlfile(str(tmp), encoding='utf-8') as xf:
         xf.write_declaration()
-        with xf.element('tv', {'generator-info-name': 'IPTV Merge Manager v0.3.1'}):
+        with xf.element('tv', {'generator-info-name': 'IPTV Merge Manager v0.3.2'}):
             for tag in ('channel', 'programme'):
                 with connect() as conn:
                     source_ids = [r['source_id'] for r in conn.execute(

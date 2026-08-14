@@ -110,6 +110,7 @@ def init_db() -> None:
 
         # Additive migrations from v0.1/v0.2 databases.
         cols = {r[1] for r in conn.execute('PRAGMA table_info(channels)').fetchall()}
+        added_hls_mode = 'hls_mode' not in cols
         for name, ddl in {
             'custom_name': 'TEXT',
             'custom_group': 'TEXT',
@@ -117,9 +118,23 @@ def init_db() -> None:
             'custom_logo': 'TEXT',
             'hls_proxy_enabled': 'INTEGER NOT NULL DEFAULT 0',
             'hls_max_height': 'INTEGER',
+            'hls_mode': 'TEXT',
         }.items():
             if name not in cols:
                 conn.execute(f'ALTER TABLE channels ADD COLUMN {name} {ddl}')
+
+        source_cols = {r[1] for r in conn.execute('PRAGMA table_info(sources)').fetchall()}
+        for name, ddl in {
+            'hls_mode': "TEXT NOT NULL DEFAULT 'inherit'",
+            'hls_max_height': 'INTEGER',
+        }.items():
+            if name not in source_cols:
+                conn.execute(f'ALTER TABLE sources ADD COLUMN {name} {ddl}')
+
+        # v0.3.1 had a boolean per-channel variant lock. Preserve that behavior exactly
+        # on first v0.3.2 migration: ON -> fixed+compatibility; OFF -> direct.
+        if added_hls_mode:
+            conn.execute("UPDATE channels SET hls_mode=CASE WHEN hls_proxy_enabled=1 THEN 'fixed' ELSE 'direct' END")
 
         log_cols = {r[1] for r in conn.execute('PRAGMA table_info(refresh_log)').fetchall()}
         if 'peak_rss_kb' not in log_cols:
@@ -129,6 +144,7 @@ def init_db() -> None:
         conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('history_limit','10')")
         conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('hls_proxy_enabled','1')")
         conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('hls_proxy_default_height','720')")
+        conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('hls_proxy_default_mode','direct')")
         conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('hls_proxy_cache_seconds','15')")
 
 

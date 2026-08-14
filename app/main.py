@@ -25,9 +25,11 @@ from pydantic import BaseModel
 
 from .db import DB_PATH, connect, get_setting, init_db, rows_to_dicts, set_setting
 from .hls_proxy import (
-    build_locked_master, fetch_manifest, invalidate as invalidate_hls_cache,
-    proxy_stats, record_bypass, record_failure, record_request,
-    resolve_master, rewrite_media_playlist, select_variant,
+    build_compat_master, build_locked_master, channel_diagnostics, effective_hls_height,
+    effective_hls_mode, fetch_manifest, invalidate as invalidate_hls_cache, proxy_stats,
+    record_bypass, record_event, record_failure, record_playlist_request, record_request,
+    record_segment_redirect, record_variant_reresolve, resolve_master, resolve_playlist_token,
+    resolve_segment_token, rewrite_media_playlist, select_variant, VALID_HLS_MODES,
 )
 
 APP_DIR = Path(__file__).resolve().parent
@@ -110,7 +112,7 @@ async def lifespan(app: FastAPI):
     scheduler.shutdown(wait=False)
 
 
-app = FastAPI(title='IPTV Merge Manager', version='0.3.1', lifespan=lifespan)
+app = FastAPI(title='IPTV Merge Manager', version='0.3.2', lifespan=lifespan)
 app.mount('/static', StaticFiles(directory=APP_DIR / 'static'), name='static')
 templates = Jinja2Templates(directory=APP_DIR / 'templates')
 
@@ -126,7 +128,8 @@ class ChannelEdit(BaseModel):
     custom_tvg_id: str | None = None
     custom_logo: str | None = None
     channel_number: int | None = None
-    hls_proxy_enabled: bool | None = None
+    hls_proxy_enabled: bool | None = None  # retained for v0.3.1 API compatibility
+    hls_mode: str | None = None
     hls_max_height: int | None = None
 
 
@@ -158,8 +161,14 @@ class ProfilePatch(BaseModel):
 
 class HlsProxySettingsPatch(BaseModel):
     enabled: bool
+    default_mode: str = 'direct'
     default_max_height: int = 720
     cache_seconds: int = 15
+
+
+class SourceHlsPatch(BaseModel):
+    mode: str = 'inherit'
+    max_height: int | None = None
 
 
 def _read_proc_kb(field: str) -> int | None:
@@ -217,7 +226,7 @@ def index(request: Request):
 
 @app.get('/health')
 def health():
-    return {'status': 'ok', 'version': '0.3.1'}
+    return {'status': 'ok', 'version': '0.3.2'}
 
 
 @app.get('/api/status')
@@ -243,12 +252,13 @@ def status():
         unnumbered = c.execute('SELECT COUNT(*) FROM channels WHERE selected=1 AND is_active=1 AND channel_number IS NULL').fetchone()[0]
         last_peak = c.execute('SELECT peak_rss_kb FROM refresh_log WHERE peak_rss_kb IS NOT NULL ORDER BY id DESC LIMIT 1').fetchone()
     return {
-        'version': '0.3.1', 'timezone': TZ_NAME, 'refresh_hours': REFRESH_HOURS,
+        'version': '0.3.2', 'timezone': TZ_NAME, 'refresh_hours': REFRESH_HOURS,
         'source_count': source_count, 'active_channels': active, 'selected_channels': selected,
         'with_epg': with_epg, 'missing_epg': missing, 'group_count': groups, 'unnumbered': unnumbered,
         'logs': logs, 'resource_profile': profile, 'default_page_size': cfg['page_size'],
         'hls_proxy': {
             'enabled': get_setting('hls_proxy_enabled', '1') == '1',
+            'default_mode': get_setting('hls_proxy_default_mode', 'direct'),
             'default_max_height': int(get_setting('hls_proxy_default_height', '720')),
             'cache_seconds': int(get_setting('hls_proxy_cache_seconds', '15')),
             **proxy_stats(),
@@ -277,19 +287,37 @@ def set_profile(req: ProfilePatch):
 
 @app.post('/api/settings/hls-proxy')
 async def set_hls_proxy_settings(req: HlsProxySettingsPatch):
+    mode = (req.default_mode or 'direct').strip().lower()
+    if mode not in VALID_HLS_MODES:
+        raise HTTPException(400, 'Unknown HLS mode')
     height = max(0, min(4320, int(req.default_max_height)))
     cache_seconds = max(1, min(300, int(req.cache_seconds)))
     set_setting('hls_proxy_enabled', '1' if req.enabled else '0')
+    set_setting('hls_proxy_default_mode', mode)
     set_setting('hls_proxy_default_height', str(height))
     set_setting('hls_proxy_cache_seconds', str(cache_seconds))
     await regenerate_outputs()
-    return {'ok': True, 'enabled': req.enabled, 'default_max_height': height, 'cache_seconds': cache_seconds}
+    return {'ok': True, 'enabled': req.enabled, 'default_mode': mode, 'default_max_height': height, 'cache_seconds': cache_seconds}
 
 
 @app.get('/api/sources')
 def sources():
     with connect() as c:
         return rows_to_dicts(c.execute('SELECT * FROM sources ORDER BY id').fetchall())
+
+
+@app.patch('/api/sources/{sid}/hls')
+async def set_source_hls(sid: int, req: SourceHlsPatch):
+    mode = (req.mode or 'inherit').strip().lower()
+    if mode not in {'inherit', *VALID_HLS_MODES}:
+        raise HTTPException(400, 'Unknown source HLS mode')
+    height = None if req.max_height is None else max(0, min(4320, int(req.max_height)))
+    with connect() as c:
+        if not c.execute('SELECT 1 FROM sources WHERE id=?', (sid,)).fetchone():
+            raise HTTPException(404, 'Source not found')
+        c.execute('UPDATE sources SET hls_mode=?,hls_max_height=? WHERE id=?', (mode, height, sid))
+    await regenerate_outputs()
+    return {'ok': True, 'mode': mode, 'max_height': height}
 
 
 @app.post('/api/sources')
@@ -365,7 +393,7 @@ def channels(
     base = f'''FROM channels c JOIN sources s ON s.id=c.source_id WHERE {' AND '.join(where)}'''
     with connect() as c:
         total = c.execute('SELECT COUNT(*) ' + base, params).fetchone()[0]
-        sql = '''SELECT c.*,s.name source_name,
+        sql = '''SELECT c.*,s.name source_name,s.hls_mode source_hls_mode,s.hls_max_height source_hls_max_height,
                  COALESCE(NULLIF(c.custom_name,''),c.name) display_name,
                  COALESCE(NULLIF(c.custom_group,''),c.group_title) display_group,
                  COALESCE(NULLIF(c.custom_tvg_id,''),c.tvg_id) display_tvg_id,
@@ -393,12 +421,24 @@ async def patch_channel(cid: int, patch: ChannelPatch):
 @app.put('/api/channels/{cid}/edit')
 async def edit_channel(cid: int, e: ChannelEdit):
     vals = [(x.strip() if isinstance(x, str) else x) or None for x in (e.custom_name, e.custom_group, e.custom_tvg_id, e.custom_logo)]
-    proxy_enabled = 1 if e.hls_proxy_enabled else 0
-    max_height = e.hls_max_height if e.hls_max_height is not None and e.hls_max_height >= 0 else None
     with connect() as c:
+        old = c.execute('SELECT hls_mode,hls_proxy_enabled,hls_max_height FROM channels WHERE id=?', (cid,)).fetchone()
+        if not old:
+            raise HTTPException(404, 'Channel not found')
+        mode = old['hls_mode']
+        if 'hls_mode' in e.model_fields_set:
+            mode = (e.hls_mode or '').strip().lower() or None
+        elif 'hls_proxy_enabled' in e.model_fields_set and e.hls_proxy_enabled is not None:
+            mode = 'fixed' if e.hls_proxy_enabled else 'direct'
+        if mode not in ({None} | VALID_HLS_MODES):
+            raise HTTPException(400, 'Unknown channel HLS mode')
+        proxy_enabled = 1 if mode in {'compat', 'fixed'} else 0
+        max_height = old['hls_max_height']
+        if 'hls_max_height' in e.model_fields_set:
+            max_height = e.hls_max_height if e.hls_max_height is not None and e.hls_max_height >= 0 else None
         c.execute(
-            'UPDATE channels SET custom_name=?,custom_group=?,custom_tvg_id=?,custom_logo=?,channel_number=?,hls_proxy_enabled=?,hls_max_height=? WHERE id=?',
-            (*vals, e.channel_number, proxy_enabled, max_height, cid),
+            'UPDATE channels SET custom_name=?,custom_group=?,custom_tvg_id=?,custom_logo=?,channel_number=?,hls_proxy_enabled=?,hls_mode=?,hls_max_height=? WHERE id=?',
+            (*vals, e.channel_number, proxy_enabled, mode, max_height, cid),
         )
     await _regenerate_after_edit(); return {'ok': True}
 
@@ -411,14 +451,22 @@ async def bulk(req: BulkAction):
     elif req.action == 'disable': field = 'selected'; value = 0
     elif req.action == 'group': field = 'custom_group'; value = str(value or '').strip() or None
     elif req.action == 'clear-numbers': field = 'channel_number'; value = None
-    elif req.action == 'hls-proxy-on': field = 'hls_proxy_enabled'; value = 1
-    elif req.action == 'hls-proxy-off': field = 'hls_proxy_enabled'; value = 0
+    elif req.action == 'hls-proxy-on': field = 'hls_mode'; value = 'fixed'
+    elif req.action == 'hls-proxy-off': field = 'hls_mode'; value = 'direct'
+    elif req.action == 'hls-mode-fixed': field = 'hls_mode'; value = 'fixed'
+    elif req.action == 'hls-mode-compat': field = 'hls_mode'; value = 'compat'
+    elif req.action == 'hls-mode-direct': field = 'hls_mode'; value = 'direct'
+    elif req.action == 'hls-mode-inherit': field = 'hls_mode'; value = None
     elif req.action == 'hls-720': field = 'hls_max_height'; value = 720
     elif req.action == 'hls-540': field = 'hls_max_height'; value = 540
     elif req.action == 'hls-360': field = 'hls_max_height'; value = 360
     elif req.action == 'hls-default': field = 'hls_max_height'; value = None
     else: raise HTTPException(400, 'Unknown bulk action')
-    with connect() as c: cur = c.execute(f'UPDATE channels SET {field}=? WHERE id IN ({ph})', [value, *req.ids])
+    with connect() as c:
+        cur = c.execute(f'UPDATE channels SET {field}=? WHERE id IN ({ph})', [value, *req.ids])
+        if field == 'hls_mode':
+            legacy_enabled = 1 if value in {'compat', 'fixed'} else 0
+            c.execute(f'UPDATE channels SET hls_proxy_enabled=? WHERE id IN ({ph})', [legacy_enabled, *req.ids])
     await _regenerate_after_edit(); return {'updated': cur.rowcount}
 
 
@@ -545,22 +593,28 @@ async def m3u(request: Request):
 @app.get('/api/channels/{cid}/hls-analyze')
 async def hls_analyze(cid: int):
     with connect() as c:
-        row = c.execute('SELECT id,name,stream_url,hls_proxy_enabled,hls_max_height FROM channels WHERE id=?', (cid,)).fetchone()
+        row = c.execute(
+            '''SELECT c.id,c.name,c.stream_url,c.hls_mode,c.hls_max_height,
+                      s.hls_mode source_hls_mode,s.hls_max_height source_hls_max_height
+               FROM channels c JOIN sources s ON s.id=c.source_id WHERE c.id=?''',
+            (cid,),
+        ).fetchone()
     if not row:
         raise HTTPException(404, 'Channel not found')
     if not str(row['stream_url']).startswith(('http://', 'https://')):
         return {'adaptive': False, 'reason': 'Stream is not HTTP/HTTPS', 'variants': []}
+    mode = effective_hls_mode(row['hls_mode'], row['source_hls_mode'], get_setting('hls_proxy_default_mode', 'direct'))
+    height = effective_hls_height(row['hls_max_height'], row['source_hls_max_height'], int(get_setting('hls_proxy_default_height', '720')))
     try:
         cache_seconds = int(get_setting('hls_proxy_cache_seconds', '15'))
         entry = await resolve_master(row['stream_url'], cache_seconds)
         variants = [v.as_dict() for v in entry.variants]
         if not entry.variants:
-            return {'adaptive': False, 'final_url': entry.final_url, 'variants': []}
-        height = row['hls_max_height'] if row['hls_max_height'] is not None else int(get_setting('hls_proxy_default_height', '720'))
+            return {'adaptive': False, 'final_url': entry.final_url, 'variants': [], 'mode': mode, 'max_height': height}
         chosen = select_variant(entry.variants, height)
         return {
             'adaptive': True,
-            'proxy_enabled': bool(row['hls_proxy_enabled']),
+            'mode': mode,
             'max_height': height,
             'variants': variants,
             'selected': chosen.as_dict(),
@@ -569,41 +623,92 @@ async def hls_analyze(cid: int):
         raise HTTPException(502, f'HLS analysis failed: {exc}')
 
 
-@app.get('/hls/channel/{cid}/index.m3u8')
-async def hls_variant_proxy(cid: int):
-    record_request()
+@app.get('/api/channels/{cid}/hls-diagnostics')
+def hls_diagnostics(cid: int):
     with connect() as c:
-        row = c.execute('SELECT id,name,stream_url,hls_proxy_enabled,hls_max_height FROM channels WHERE id=? AND is_active=1', (cid,)).fetchone()
+        row = c.execute(
+            '''SELECT c.id,c.name,c.hls_mode,c.hls_max_height,
+                      s.hls_mode source_hls_mode,s.hls_max_height source_hls_max_height
+               FROM channels c JOIN sources s ON s.id=c.source_id WHERE c.id=?''',
+            (cid,),
+        ).fetchone()
     if not row:
         raise HTTPException(404, 'Channel not found')
+    mode = effective_hls_mode(row['hls_mode'], row['source_hls_mode'], get_setting('hls_proxy_default_mode', 'direct'))
+    height = effective_hls_height(row['hls_max_height'], row['source_hls_max_height'], int(get_setting('hls_proxy_default_height', '720')))
+    return {**channel_diagnostics(cid), 'name': row['name'], 'mode': mode, 'max_height': height}
+
+
+def _hls_response(body: str, mode: str, height: int | None = None) -> Response:
+    headers = {
+        'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0',
+        'Pragma': 'no-cache',
+        'X-IPTVMM-HLS-Mode': mode,
+    }
+    if height is not None:
+        headers['X-IPTVMM-Variant-Lock'] = str(height)
+    return Response(content=body, media_type='application/vnd.apple.mpegurl', headers=headers)
+
+
+@app.get('/hls/channel/{cid}/index.m3u8')
+async def hls_proxy(cid: int, request: Request):
+    record_request(cid)
+    with connect() as c:
+        row = c.execute(
+            '''SELECT c.id,c.name,c.stream_url,c.hls_mode,c.hls_max_height,
+                      s.hls_mode source_hls_mode,s.hls_max_height source_hls_max_height
+               FROM channels c JOIN sources s ON s.id=c.source_id
+               WHERE c.id=? AND c.is_active=1 AND s.enabled=1''',
+            (cid,),
+        ).fetchone()
+    if not row:
+        raise HTTPException(404, 'Channel not found')
+
     upstream = row['stream_url']
-    global_enabled = get_setting('hls_proxy_enabled', '1') == '1'
-    if not global_enabled or not row['hls_proxy_enabled']:
-        record_bypass()
+    if get_setting('hls_proxy_enabled', '1') != '1':
+        record_bypass(cid)
         return RedirectResponse(upstream, status_code=307)
 
-    height = row['hls_max_height'] if row['hls_max_height'] is not None else int(get_setting('hls_proxy_default_height', '720'))
+    mode = effective_hls_mode(row['hls_mode'], row['source_hls_mode'], get_setting('hls_proxy_default_mode', 'direct'))
+    height = effective_hls_height(row['hls_max_height'], row['source_hls_max_height'], int(get_setting('hls_proxy_default_height', '720')))
     cache_seconds = int(get_setting('hls_proxy_cache_seconds', '15'))
+    local_base = str(request.base_url).rstrip('/')
 
-    async def resolve_selected(force: bool = False):
-        if force:
-            await invalidate_hls_cache(upstream)
-        master = await resolve_master(upstream, cache_seconds)
-        if not master.variants:
-            return master, None
-        return master, select_variant(master.variants, height)
+    if mode == 'direct':
+        record_bypass(cid)
+        return RedirectResponse(upstream, status_code=307)
 
     try:
+        if mode == 'compat':
+            master = await resolve_master(upstream, cache_seconds)
+            if not master.manifest.startswith('#EXTM3U'):
+                record_bypass(cid)
+                return RedirectResponse(master.final_url, status_code=307)
+            if master.variants:
+                body = build_compat_master(master.manifest, master.final_url, cid, local_base)
+            else:
+                body = rewrite_media_playlist(master.manifest, master.final_url, cid, local_base, True, 'media')
+            return _hls_response(body, mode)
+
+        async def resolve_selected(force: bool = False):
+            if force:
+                await invalidate_hls_cache(upstream)
+                record_variant_reresolve(cid)
+            master = await resolve_master(upstream, cache_seconds)
+            if not master.variants:
+                return master, None
+            return master, select_variant(master.variants, height)
+
         master, selected = await resolve_selected()
         if selected is None:
-            record_bypass()
+            if master.manifest.startswith('#EXTM3U'):
+                body = rewrite_media_playlist(master.manifest, master.final_url, cid, local_base, True, 'media')
+                return _hls_response(body, mode, height)
+            record_bypass(cid)
             return RedirectResponse(master.final_url, status_code=307)
 
-        # If the master uses a separate audio rendition, retain a one-variant mini-master
-        # so the referenced audio group remains available. Otherwise return the selected
-        # media playlist directly, which prevents FFmpeg from seeing multiple programs.
         if selected.attrs.get('AUDIO'):
-            body = build_locked_master(master.manifest, master.final_url, selected)
+            body = build_locked_master(master.manifest, master.final_url, selected, cid, local_base)
         else:
             try:
                 media, media_url = await fetch_manifest(selected.absolute_uri)
@@ -612,27 +717,53 @@ async def hls_variant_proxy(cid: int):
                     raise
                 master, selected = await resolve_selected(force=True)
                 if selected is None:
-                    record_bypass()
+                    record_bypass(cid)
                     return RedirectResponse(master.final_url, status_code=307)
                 media, media_url = await fetch_manifest(selected.absolute_uri)
             if not media.startswith('#EXTM3U'):
-                # Unexpected response; the one-variant master is safer than serving garbage.
-                body = build_locked_master(master.manifest, master.final_url, selected)
+                body = build_locked_master(master.manifest, master.final_url, selected, cid, local_base)
             else:
-                body = rewrite_media_playlist(media, media_url)
-
-        return Response(
-            content=body,
-            media_type='application/vnd.apple.mpegurl',
-            headers={
-                'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0',
-                'Pragma': 'no-cache',
-                'X-IPTVMM-Variant-Lock': str(height),
-            },
-        )
+                body = rewrite_media_playlist(media, media_url, cid, local_base, True, 'media')
+        return _hls_response(body, mode, height)
     except Exception as exc:
-        record_failure()
-        raise HTTPException(502, f'HLS variant proxy failed: {exc}')
+        record_failure(cid, str(exc))
+        raise HTTPException(502, f'HLS proxy failed: {exc}')
+
+
+@app.get('/hls/channel/{cid}/playlist/{token}.m3u8')
+async def hls_child_playlist(cid: int, token: str, request: Request):
+    record_playlist_request(cid)
+    entry = resolve_playlist_token(cid, token)
+    if not entry:
+        raise HTTPException(410, 'HLS child playlist token expired; reopen the channel to refresh it')
+    local_base = str(request.base_url).rstrip('/')
+    try:
+        body, final_url = await fetch_manifest(entry.url)
+        if not body.startswith('#EXTM3U'):
+            raise HTTPException(502, 'Upstream child playlist did not return M3U8 data')
+        from .hls_proxy import parse_master
+        variants = parse_master(body, final_url)
+        if variants:
+            rewritten = build_compat_master(body, final_url, cid, local_base)
+        else:
+            rewritten = rewrite_media_playlist(body, final_url, cid, local_base, True, entry.kind)
+        return _hls_response(rewritten, 'compat')
+    except HTTPException:
+        raise
+    except Exception as exc:
+        record_failure(cid, str(exc))
+        raise HTTPException(502, f'HLS child playlist failed: {exc}')
+
+
+@app.get('/hls/channel/{cid}/segment/{token}.{suffix}')
+def hls_segment_redirect(cid: int, token: str, suffix: str):
+    entry = resolve_segment_token(cid, token)
+    if not entry:
+        raise HTTPException(410, 'HLS segment alias expired')
+    if entry.suffix.lower() != f'.{suffix.lower()}':
+        raise HTTPException(404, 'HLS segment alias extension mismatch')
+    record_segment_redirect(cid)
+    return RedirectResponse(entry.url, status_code=302, headers={'Cache-Control': 'no-store'})
 
 
 @app.get('/output/master.xml')
