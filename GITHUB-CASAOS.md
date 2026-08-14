@@ -17,7 +17,7 @@ From a computer with Git installed:
 ```bash
 git init
 git add .
-git commit -m "IPTV Merge Manager v0.2.0"
+git commit -m "IPTV Merge Manager v0.3.0"
 git branch -M main
 git remote add origin https://github.com/YOUR_GITHUB_USERNAME/iptv-merge-manager.git
 git push -u origin main
@@ -29,16 +29,16 @@ The included GitHub Actions workflow publishes a multi-architecture image to:
 
 A push to `main` publishes `latest`. A version tag publishes versioned tags.
 
-## 3. Publish v0.2.0
+## 3. Publish v0.3.0
 
 ```bash
-git tag v0.2.0
-git push origin v0.2.0
+git tag v0.3.0
+git push origin v0.3.0
 ```
 
 After the GitHub Actions job finishes, the versioned image is:
 
-`ghcr.io/YOUR_GITHUB_USERNAME/iptv-merge-manager:0.2.0`
+`ghcr.io/YOUR_GITHUB_USERNAME/iptv-merge-manager:0.3.0`
 
 ## 4. Make the GHCR package public
 
@@ -74,20 +74,21 @@ Generated feeds:
 
 - `http://CASAOS-IP:8080/output/master.m3u`
 - `http://CASAOS-IP:8080/output/master.xml`
+- `http://CASAOS-IP:8080/output/master.xml.gz`
 
 ## Updating later
 
-For a new release such as v0.2.0:
+For a later release such as v0.3.1:
 
 1. Update the source and version.
 2. Commit and push.
 3. Tag the release:
 
 ```bash
-git tag v0.2.0
-git push origin v0.2.0
+git tag v0.3.1
+git push origin v0.3.1
 ```
 
-4. Change the CasaOS image tag from `0.2.0` to `0.2.0` and update/recreate the app.
+4. Change the CasaOS image tag from `0.3.0` to `0.3.1` and update/recreate the app.
 
 Pinning CasaOS to a versioned image tag is preferred over relying on `latest`, because it makes upgrades explicit and rollbacks straightforward.

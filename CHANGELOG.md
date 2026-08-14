@@ -1,13 +1,29 @@
 # Changelog
 
-## v0.2.0
-- Full per-channel editor with persistent name, group, TVG-ID, logo, and number overrides.
-- Bulk channel actions for lineup membership, custom groups, and number clearing.
-- Custom lineup groups with group-specific numbering ranges and increments.
-- XMLTV/EPG match suggestions using cached guide channel names.
-- Expanded dashboard statistics for EPG coverage, groups, and unnumbered channels.
-- ZIP configuration backup and restore for SQLite data plus uploaded source files.
-- Additive SQLite migrations preserve v0.1.x configurations.
+## v0.3.0
 
-## v0.1.1
-- CasaOS/GHCR deployment support and multi-architecture publishing.
+Resource-optimization release:
+
+- Short-lived worker process for refresh, XMLTV parsing, EPG suggestions, and output generation.
+- Streaming HTTP downloads and uploaded-file handling.
+- Streaming M3U parser; no full-playlist string/list retained in RAM.
+- Streaming XMLTV `iterparse` with sibling cleanup.
+- Disk-backed guide cache plus SQLite-only EPG channel index.
+- Sequential source refreshes.
+- Paginated channel browser with Low Memory/Balanced/Performance profiles.
+- Resource Monitor for web RSS, container RAM, worker refresh peak, disk cache, and outputs.
+- Refresh-history retention limits.
+- Atomic temporary-file generation for M3U/XMLTV.
+- New compressed `/output/master.xml.gz` output.
+- Last-known-good protection against empty/invalid feeds and sudden >50% lineup/EPG loss.
+- Single explicit Uvicorn worker and lightweight health check.
+- Preserves v0.2 channel editor, bulk actions, custom groups, numbering, EPG suggestions, dashboard, and backup/restore.
+
+## v0.2.0
+
+- Full channel metadata editor.
+- Bulk channel operations.
+- Custom groups and group-based numbering.
+- EPG match suggestions.
+- Expanded dashboard.
+- Backup and restore.
