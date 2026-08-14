@@ -1,22 +1,30 @@
 # Changelog
 
+## v0.3.3
+
+Guarded HLS segment resilience patch:
+
+- Replaced v0.3.2 synthetic-segment HTTP redirects with a guarded streaming relay only for extensionless/unsupported compatibility aliases.
+- Ordinary recognized HLS media URLs remain direct from Jellyfin to the provider/CDN.
+- Added bounded connect/first-byte/read-idle/overall segment deadlines.
+- Added bounded retries before any media bytes are emitted.
+- Before a pre-media retry, refreshes the same media playlist and can follow a changed URL only for the exact same HLS media sequence.
+- Added a mid-segment stale-data watchdog; partial segments are never restarted/concatenated.
+- Added downstream-disconnect cancellation and guaranteed upstream response/client cleanup.
+- Added relay, retry, timeout, cancellation, completion, byte, and failure diagnostics.
+- Added Compose/CasaOS environment controls for relay timeouts and attempt count.
+- Preserved the v0.3 low-memory one-worker, disk-backed refresh/XMLTV architecture.
+
 ## v0.3.2
 
-HLS compatibility and resilience release:
+HLS compatibility release:
 
 - Added Direct, Playlist Compatibility, and Fixed Variant + Compatibility modes.
-- Added global → source → channel HLS setting inheritance.
-- Migrates v0.3.1 locked channels to Fixed Variant + Compatibility and unlocked channels to Direct.
-- Detects extensionless/unsupported media-segment URLs and exposes short-lived local aliases with safe synthetic extensions.
-- Segment alias endpoints issue redirects only; IPTV Merge Manager does not buffer or relay media payloads.
-- Added bounded, expiring segment and child-playlist registries to prevent unbounded memory growth.
-- Adaptive Compatibility mode rewrites child playlist references back through the local playlist layer while preserving the master variants.
-- Preserves HLS discontinuity metadata and records new discontinuities in per-channel diagnostics.
-- Detects upstream CDN host changes and records them as HLS events.
-- Retains 401/403/404/410 master re-resolution and adds a visible re-resolve counter.
-- Added per-channel HLS diagnostics with a bounded recent-event history.
-- Expanded global HLS runtime counters for segment redirects, extensionless fixes, discontinuities, CDN changes, and variant re-resolves.
-- Keeps normal `.ts`/`.m4s` media URLs direct to the provider/CDN to preserve v0.3 low-resource behavior.
+- Added Global → Source → Channel HLS inheritance.
+- Normalized extensionless/unsupported HLS media URLs to short-lived synthetic safe-extension aliases.
+- Added child-playlist routing and discontinuity/CDN-change diagnostics.
+- Preserved direct media delivery for recognized `.ts`/`.m4s` segments.
+- Migrated v0.3.1 Variant Lock settings without changing expected channel behavior.
 
 ## v0.3.1
 

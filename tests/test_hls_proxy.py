@@ -1,6 +1,9 @@
+import asyncio
 import tempfile
+import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from app.hls_proxy import (
     build_compat_master,
@@ -9,12 +12,17 @@ from app.hls_proxy import (
     effective_hls_height,
     effective_hls_mode,
     parse_master,
+    prepare_segment_relay,
+    proxy_stats,
+    RegistryEntry,
     resolve_playlist_token,
     resolve_segment_token,
     rewrite_media_playlist,
     select_variant,
+    segment_relay_headers,
+    stream_segment_relay,
 )
-from app import db, iptv
+from app import db, iptv, hls_proxy
 
 
 MASTER = '''#EXTM3U
@@ -92,6 +100,8 @@ https://pb.example.net/v1/segment/hash/provider/session/2/1575659
         entry = resolve_segment_token(3202, token)
         self.assertIsNotNone(entry)
         self.assertTrue(entry.url.endswith('/2/1575659'))
+        self.assertEqual(entry.media_sequence, 0)
+        self.assertEqual(entry.playlist_url, BASE)
         diag = channel_diagnostics(3202)
         self.assertEqual(diag['stats'].get('extensionless_segments'), 1)
         self.assertEqual(diag['stats'].get('discontinuities'), 1)
@@ -169,6 +179,195 @@ https://pb.example.net/v1/segment/hash/provider/session/2/1575659
             finally:
                 db.DATA_DIR, db.DB_PATH = old_data, old_db
                 iptv.DATA_DIR, iptv.CACHE_DIR, iptv.OUTPUT_DIR = old_iptv_data, old_cache, old_output
+
+
+class GuardedSegmentRelayTests(unittest.IsolatedAsyncioTestCase):
+    async def _server(self, responder):
+        async def handler(reader, writer):
+            try:
+                await reader.readuntil(b'\r\n\r\n')
+                await responder(writer)
+            except (asyncio.IncompleteReadError, ConnectionResetError, BrokenPipeError):
+                pass
+            finally:
+                try:
+                    writer.close()
+                    await writer.wait_closed()
+                except Exception:
+                    pass
+
+        server = await asyncio.start_server(handler, '127.0.0.1', 0)
+        port = server.sockets[0].getsockname()[1]
+        return server, f'http://127.0.0.1:{port}/segment'
+
+    async def test_guarded_relay_streams_synthetic_segment(self):
+        payload = b'IPTVMM-SEGMENT-' * 8192
+
+        async def responder(writer):
+            writer.write(
+                b'HTTP/1.1 200 OK\r\n'
+                b'Content-Type: video/mp2t\r\n'
+                + f'Content-Length: {len(payload)}\r\n'.encode()
+                + b'Connection: close\r\n\r\n'
+                + payload
+            )
+            await writer.drain()
+
+        server, url = await self._server(responder)
+        try:
+            entry = RegistryEntry(url=url, channel_id=9101, expires_at=time.monotonic() + 60, suffix='.ts')
+            before = proxy_stats()['segment_completed']
+            relay = await prepare_segment_relay(9101, entry)
+            async def connected(): return False
+            chunks = [chunk async for chunk in stream_segment_relay(9101, relay, connected)]
+            self.assertEqual(b''.join(chunks), payload)
+            self.assertEqual(segment_relay_headers(relay)['X-IPTVMM-Segment-Relay'], 'guarded')
+            self.assertEqual(proxy_stats()['segment_completed'], before + 1)
+        finally:
+            server.close()
+            await server.wait_closed()
+
+    async def test_first_byte_stall_is_retried_then_fails_bounded(self):
+        async def responder(writer):
+            writer.write(b'HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\nConnection: close\r\n\r\n')
+            await writer.drain()
+            await asyncio.sleep(0.5)
+
+        server, url = await self._server(responder)
+        try:
+            entry = RegistryEntry(url=url, channel_id=9102, expires_at=time.monotonic() + 60, suffix='.ts')
+            before = proxy_stats()
+            with patch.object(hls_proxy, 'SEGMENT_CONNECT_TIMEOUT', 0.05), \
+                 patch.object(hls_proxy, 'SEGMENT_FIRST_BYTE_TIMEOUT', 0.05), \
+                 patch.object(hls_proxy, 'SEGMENT_READ_IDLE_TIMEOUT', 0.05), \
+                 patch.object(hls_proxy, 'SEGMENT_TOTAL_TIMEOUT', 0.12), \
+                 patch.object(hls_proxy, 'SEGMENT_MAX_ATTEMPTS', 2):
+                with self.assertRaises(RuntimeError):
+                    await prepare_segment_relay(9102, entry)
+            after = proxy_stats()
+            self.assertGreaterEqual(after['segment_timeouts'] - before['segment_timeouts'], 2)
+            self.assertEqual(after['segment_retries'] - before['segment_retries'], 1)
+            self.assertEqual(after['segment_relay_failures'] - before['segment_relay_failures'], 1)
+        finally:
+            server.close()
+            await server.wait_closed()
+
+    async def test_failed_segment_refreshes_same_media_sequence_to_new_url(self):
+        payload = b'RECOVERED-SEGMENT-' * 8192
+        base = ''
+
+        async def handler(reader, writer):
+            try:
+                request = await reader.readuntil(b'\r\n\r\n')
+                path = request.split(b' ', 2)[1].decode()
+                if path == '/old':
+                    writer.write(b'HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\nConnection: close\r\n\r\n')
+                    await writer.drain()
+                    await asyncio.sleep(0.4)
+                elif path == '/playlist.m3u8':
+                    body = (
+                        '#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:500\n#EXT-X-TARGETDURATION:6\n'
+                        '#EXTINF:6.0,\n' + base + '/new\n'
+                    ).encode()
+                    writer.write(
+                        b'HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\n'
+                        + f'Content-Length: {len(body)}\r\n'.encode()
+                        + b'Connection: close\r\n\r\n' + body
+                    )
+                    await writer.drain()
+                elif path == '/new':
+                    writer.write(
+                        b'HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\n'
+                        + f'Content-Length: {len(payload)}\r\n'.encode()
+                        + b'Connection: close\r\n\r\n' + payload
+                    )
+                    await writer.drain()
+                else:
+                    writer.write(b'HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n')
+                    await writer.drain()
+            except (asyncio.IncompleteReadError, ConnectionResetError, BrokenPipeError):
+                pass
+            finally:
+                try:
+                    writer.close()
+                    await writer.wait_closed()
+                except Exception:
+                    pass
+
+        server = await asyncio.start_server(handler, '127.0.0.1', 0)
+        port = server.sockets[0].getsockname()[1]
+        base = f'http://127.0.0.1:{port}'
+        try:
+            entry = RegistryEntry(
+                url=base + '/old', channel_id=9105, expires_at=time.monotonic() + 60,
+                suffix='.ts', playlist_url=base + '/playlist.m3u8', media_sequence=500,
+            )
+            before = proxy_stats()['segment_url_recoveries']
+            with patch.object(hls_proxy, 'SEGMENT_CONNECT_TIMEOUT', 0.05), \
+                 patch.object(hls_proxy, 'SEGMENT_FIRST_BYTE_TIMEOUT', 0.05), \
+                 patch.object(hls_proxy, 'SEGMENT_READ_IDLE_TIMEOUT', 0.05), \
+                 patch.object(hls_proxy, 'SEGMENT_TOTAL_TIMEOUT', 0.20), \
+                 patch.object(hls_proxy, 'SEGMENT_PLAYLIST_REFRESH_TIMEOUT', 0.20), \
+                 patch.object(hls_proxy, 'SEGMENT_MAX_ATTEMPTS', 2):
+                relay = await prepare_segment_relay(9105, entry)
+                async def connected(): return False
+                chunks = [chunk async for chunk in stream_segment_relay(9105, relay, connected)]
+            self.assertEqual(relay.attempt, 2)
+            self.assertTrue(relay.final_url.endswith('/new'))
+            self.assertEqual(b''.join(chunks), payload)
+            self.assertEqual(proxy_stats()['segment_url_recoveries'], before + 1)
+        finally:
+            server.close()
+            await server.wait_closed()
+
+    async def test_mid_segment_idle_watchdog_closes_stream(self):
+        first = b'X' * hls_proxy.SEGMENT_CHUNK_BYTES
+
+        async def responder(writer):
+            writer.write(b'HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\nConnection: close\r\n\r\n' + first)
+            await writer.drain()
+            await asyncio.sleep(0.5)
+
+        server, url = await self._server(responder)
+        try:
+            entry = RegistryEntry(url=url, channel_id=9103, expires_at=time.monotonic() + 60, suffix='.ts')
+            before = proxy_stats()['segment_timeouts']
+            with patch.object(hls_proxy, 'SEGMENT_READ_IDLE_TIMEOUT', 0.05), \
+                 patch.object(hls_proxy, 'SEGMENT_TOTAL_TIMEOUT', 0.15), \
+                 patch.object(hls_proxy, 'SEGMENT_MAX_ATTEMPTS', 1):
+                relay = await prepare_segment_relay(9103, entry)
+                async def connected(): return False
+                chunks = [chunk async for chunk in stream_segment_relay(9103, relay, connected)]
+            self.assertEqual(b''.join(chunks), first)
+            self.assertGreaterEqual(proxy_stats()['segment_timeouts'], before + 1)
+        finally:
+            server.close()
+            await server.wait_closed()
+
+    async def test_downstream_disconnect_cancels_upstream_relay(self):
+        first = b'Y' * hls_proxy.SEGMENT_CHUNK_BYTES
+
+        async def responder(writer):
+            writer.write(b'HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\nConnection: close\r\n\r\n' + first)
+            await writer.drain()
+            await asyncio.sleep(0.5)
+
+        server, url = await self._server(responder)
+        try:
+            entry = RegistryEntry(url=url, channel_id=9104, expires_at=time.monotonic() + 60, suffix='.ts')
+            relay = await prepare_segment_relay(9104, entry)
+            calls = 0
+            async def disconnected():
+                nonlocal calls
+                calls += 1
+                return calls >= 2
+            before = proxy_stats()['segment_disconnects']
+            chunks = [chunk async for chunk in stream_segment_relay(9104, relay, disconnected)]
+            self.assertEqual(b''.join(chunks), first)
+            self.assertEqual(proxy_stats()['segment_disconnects'], before + 1)
+        finally:
+            server.close()
+            await server.wait_closed()
 
 
 if __name__ == '__main__':

@@ -1,7 +1,7 @@
 services:
   iptv-merge-manager:
     build: .
-    image: iptv-merge-manager:0.3.2
+    image: iptv-merge-manager:0.3.3
     container_name: iptv-merge-manager
     restart: unless-stopped
     ports:
@@ -9,6 +9,12 @@ services:
     environment:
       TZ: America/New_York
       REFRESH_HOURS: "4"
+      HLS_SEGMENT_CONNECT_TIMEOUT: "4"
+      HLS_SEGMENT_FIRST_BYTE_TIMEOUT: "6"
+      HLS_SEGMENT_READ_IDLE_TIMEOUT: "10"
+      HLS_SEGMENT_TOTAL_TIMEOUT: "20"
+      HLS_SEGMENT_PLAYLIST_REFRESH_TIMEOUT: "4"
+      HLS_SEGMENT_MAX_ATTEMPTS: "2"
     volumes:
       - ./data:/app/data
       - ./output:/app/output

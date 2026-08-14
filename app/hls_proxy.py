@@ -12,7 +12,14 @@ from urllib.parse import urljoin, urlparse
 
 import httpx
 
-APP_VERSION = '0.3.2'
+APP_VERSION = '0.3.3'
+SEGMENT_CONNECT_TIMEOUT = max(1.0, float(os.getenv('HLS_SEGMENT_CONNECT_TIMEOUT', '4')))
+SEGMENT_FIRST_BYTE_TIMEOUT = max(1.0, float(os.getenv('HLS_SEGMENT_FIRST_BYTE_TIMEOUT', '6')))
+SEGMENT_READ_IDLE_TIMEOUT = max(1.0, float(os.getenv('HLS_SEGMENT_READ_IDLE_TIMEOUT', '10')))
+SEGMENT_TOTAL_TIMEOUT = max(5.0, float(os.getenv('HLS_SEGMENT_TOTAL_TIMEOUT', '20')))
+SEGMENT_PLAYLIST_REFRESH_TIMEOUT = max(1.0, float(os.getenv('HLS_SEGMENT_PLAYLIST_REFRESH_TIMEOUT', '4')))
+SEGMENT_MAX_ATTEMPTS = max(1, min(4, int(os.getenv('HLS_SEGMENT_MAX_ATTEMPTS', '2'))))
+SEGMENT_CHUNK_BYTES = max(16 * 1024, min(1024 * 1024, int(os.getenv('HLS_SEGMENT_CHUNK_BYTES', str(128 * 1024)))))
 DEFAULT_MAX_HEIGHT = 720
 DEFAULT_CACHE_SECONDS = 15
 MAX_MANIFEST_BYTES = 512 * 1024
@@ -70,6 +77,21 @@ class RegistryEntry:
     expires_at: float
     kind: str = 'media'
     suffix: str = '.ts'
+    playlist_url: str | None = None
+    media_sequence: int | None = None
+
+
+@dataclass
+class PreparedSegmentRelay:
+    client: httpx.AsyncClient
+    response: httpx.Response
+    iterator: object
+    first_chunk: bytes
+    deadline: float
+    attempt: int
+    final_url: str
+    content_type: str
+    content_length: str | None
 
 
 _cache: dict[str, CacheEntry] = {}
@@ -84,7 +106,16 @@ _stats = {
     'bypasses': 0,
     'failures': 0,
     'playlist_requests': 0,
-    'segment_redirects': 0,
+    'segment_redirects': 0,  # retained as a legacy v0.3.2 counter
+    'segment_relays': 0,
+    'segment_retries': 0,
+    'segment_timeouts': 0,
+    'segment_disconnects': 0,
+    'segment_completed': 0,
+    'segment_relay_failures': 0,
+    'segment_playlist_refreshes': 0,
+    'segment_url_recoveries': 0,
+    'segment_bytes': 0,
     'extensionless_segments': 0,
     'discontinuities': 0,
     'cdn_switches': 0,
@@ -213,15 +244,25 @@ def _token(channel_id: int, url: str, namespace: str) -> str:
     return hashlib.sha256(f'{namespace}\0{channel_id}\0{url}'.encode()).hexdigest()[:24]
 
 
-def register_segment_url(channel_id: int, url: str, suffix: str = '.ts') -> tuple[str, bool]:
+def register_segment_url(
+    channel_id: int,
+    url: str,
+    suffix: str = '.ts',
+    playlist_url: str | None = None,
+    media_sequence: int | None = None,
+) -> tuple[str, bool]:
     if not is_http_url(url):
         raise ValueError('Only HTTP/HTTPS segment URLs can be registered')
-    token = _token(channel_id, url, 'segment')
+    token_identity = f'{url}\0{media_sequence if media_sequence is not None else ""}'
+    token = _token(channel_id, token_identity, 'segment')
     now = time.monotonic()
     with _registry_lock:
         _trim_registry(_segment_registry, MAX_SEGMENT_TOKENS)
         is_new = token not in _segment_registry
-        _segment_registry[token] = RegistryEntry(url, channel_id, now + SEGMENT_TOKEN_TTL, suffix=suffix)
+        _segment_registry[token] = RegistryEntry(
+            url, channel_id, now + SEGMENT_TOKEN_TTL, suffix=suffix,
+            playlist_url=playlist_url, media_sequence=media_sequence,
+        )
     return token, is_new
 
 
@@ -437,7 +478,243 @@ def record_playlist_request(channel_id: int) -> None:
 
 
 def record_segment_redirect(channel_id: int) -> None:
+    # Kept for API/backward compatibility with v0.3.2 diagnostics. v0.3.3 no longer
+    # redirects synthetic segment aliases; those aliases use the guarded relay below.
     _inc('segment_redirects', channel_id)
+
+
+def _segment_request_headers() -> dict[str, str]:
+    return {
+        'User-Agent': DEFAULT_USER_AGENT,
+        'Accept': '*/*',
+        'Cache-Control': 'no-cache',
+        'Connection': 'close',
+    }
+
+
+def _segment_timeout() -> httpx.Timeout:
+    return httpx.Timeout(
+        connect=SEGMENT_CONNECT_TIMEOUT,
+        read=SEGMENT_READ_IDLE_TIMEOUT,
+        write=SEGMENT_READ_IDLE_TIMEOUT,
+        pool=SEGMENT_CONNECT_TIMEOUT,
+    )
+
+
+def _media_sequence_url(manifest: str, base_url: str, target_sequence: int) -> str | None:
+    sequence = 0
+    offset = 0
+    for raw in manifest.replace('\r\n', '\n').replace('\r', '\n').split('\n'):
+        line = raw.strip()
+        if not line:
+            continue
+        upper = line.upper()
+        if upper.startswith('#EXT-X-MEDIA-SEQUENCE:'):
+            sequence = _int_or_none(line.split(':', 1)[1].strip()) or 0
+            offset = 0
+            continue
+        if line.startswith('#'):
+            continue
+        current = sequence + offset
+        if current == target_sequence:
+            return urljoin(base_url, line)
+        offset += 1
+    return None
+
+
+async def refresh_segment_candidate(channel_id: int, entry: RegistryEntry, current_url: str) -> str | None:
+    """Re-read the same media playlist and resolve only the same HLS media sequence.
+
+    We intentionally do not substitute a newer sequence. If the target has rolled out of the
+    live window, FFmpeg should reload the playlist itself rather than IPTVMM silently skipping
+    content. This recovery exists for SSAI/CDN cases where a sequence is republished at a new URL.
+    """
+    if not entry.playlist_url or entry.media_sequence is None:
+        return None
+    _inc('segment_playlist_refreshes', channel_id)
+    try:
+        async with asyncio.timeout(SEGMENT_PLAYLIST_REFRESH_TIMEOUT):
+            manifest, final_url = await _fetch_manifest(entry.playlist_url)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        _event(channel_id, 'segment-refresh-failed', f'Could not refresh the media playlist during segment recovery: {exc}')
+        return None
+    if not manifest.startswith('#EXTM3U'):
+        return None
+    candidate = _media_sequence_url(manifest, final_url, entry.media_sequence)
+    if candidate and candidate != current_url:
+        # Remember the recovered URL for any repeat request to the same short-lived alias.
+        # The token remains valid because it identifies the playlist occurrence, not a security secret.
+        with _registry_lock:
+            entry.url = candidate
+            entry.playlist_url = final_url
+        _inc('segment_url_recoveries', channel_id)
+        _event(
+            channel_id, 'segment-url-recovered',
+            f'Media sequence {entry.media_sequence} moved to a new upstream URL; retrying the refreshed segment.',
+        )
+        return candidate
+    return None
+
+
+async def prepare_segment_relay(channel_id: int, entry: RegistryEntry) -> PreparedSegmentRelay:
+    """Open a synthetic compatibility segment with bounded retries.
+
+    The first media bytes are acquired before Starlette sends the response headers. This is
+    deliberate: a provider that accepts the TCP/TLS request but never returns media can be
+    retried or rejected with a clean 504 instead of leaving FFmpeg blocked indefinitely.
+    Only synthetic compatibility aliases use this path; normal HLS media URLs stay direct.
+    """
+    last_exc: Exception | None = None
+    current_url = entry.url
+    for attempt in range(1, SEGMENT_MAX_ATTEMPTS + 1):
+        last_exc = None
+        client = httpx.AsyncClient(
+            follow_redirects=True,
+            timeout=_segment_timeout(),
+            headers=_segment_request_headers(),
+            limits=httpx.Limits(max_connections=2, max_keepalive_connections=0),
+        )
+        response: httpx.Response | None = None
+        started = time.monotonic()
+        deadline = started + SEGMENT_TOTAL_TIMEOUT
+        try:
+            request = client.build_request('GET', current_url)
+            preflight_timeout = min(SEGMENT_TOTAL_TIMEOUT, SEGMENT_CONNECT_TIMEOUT + SEGMENT_FIRST_BYTE_TIMEOUT)
+            async with asyncio.timeout(preflight_timeout):
+                response = await client.send(request, stream=True)
+                response.raise_for_status()
+                iterator = response.aiter_bytes(SEGMENT_CHUNK_BYTES)
+                first_chunk = await anext(iterator)
+                if not first_chunk:
+                    raise RuntimeError('Upstream segment returned an empty first chunk')
+            _inc('segment_relays', channel_id)
+            if attempt > 1:
+                _event(channel_id, 'segment-recovered', f'Compatibility segment recovered on attempt {attempt}.')
+            return PreparedSegmentRelay(
+                client=client,
+                response=response,
+                iterator=iterator,
+                first_chunk=first_chunk,
+                deadline=deadline,
+                attempt=attempt,
+                final_url=str(response.url),
+                content_type=response.headers.get('content-type', 'video/mp2t'),
+                content_length=response.headers.get('content-length'),
+            )
+        except asyncio.CancelledError:
+            last_exc = RuntimeError('Downstream cancelled the compatibility segment during preflight')
+            _inc('segment_disconnects', channel_id)
+            _event(channel_id, 'segment-cancelled', 'Downstream playback disconnected during compatibility-segment preflight; cancelled the upstream request.')
+            raise
+        except (asyncio.TimeoutError, TimeoutError, httpx.TimeoutException) as exc:
+            last_exc = exc
+            _inc('segment_timeouts', channel_id)
+            _event(channel_id, 'segment-timeout', f'Compatibility segment timed out on attempt {attempt}; aborting the upstream request.')
+        except StopAsyncIteration as exc:
+            last_exc = RuntimeError('Upstream segment returned no media bytes')
+        except (httpx.HTTPStatusError, httpx.RequestError, RuntimeError) as exc:
+            last_exc = exc
+        except Exception as exc:
+            last_exc = exc
+        finally:
+            if last_exc is not None:
+                if response is not None:
+                    await response.aclose()
+                await client.aclose()
+
+        if attempt < SEGMENT_MAX_ATTEMPTS:
+            candidate = await refresh_segment_candidate(channel_id, entry, current_url)
+            if candidate:
+                current_url = candidate
+            _inc('segment_retries', channel_id)
+            _event(channel_id, 'segment-retry', f'Retrying compatibility segment ({attempt + 1}/{SEGMENT_MAX_ATTEMPTS}).')
+            await asyncio.sleep(0.15)
+
+    _inc('segment_relay_failures', channel_id)
+    message = str(last_exc or 'unknown upstream segment failure')
+    _event(channel_id, 'segment-failed', f'Compatibility segment failed after {SEGMENT_MAX_ATTEMPTS} bounded attempt(s): {message}')
+    raise RuntimeError(message)
+
+
+async def stream_segment_relay(channel_id: int, relay: PreparedSegmentRelay, is_disconnected=None):
+    """Yield one compatibility segment while enforcing read-idle/absolute deadlines.
+
+    A retry is intentionally not attempted after bytes have been emitted because concatenating
+    a restarted segment onto a partial response would corrupt MPEG-TS/fMP4. If the upstream
+    stalls mid-segment, the response is closed so FFmpeg can fail/reload rather than wait forever.
+    """
+    bytes_sent = 0
+    completed = False
+    disconnected = False
+    timed_out = False
+    try:
+        if is_disconnected is not None and await is_disconnected():
+            disconnected = True
+            return
+        bytes_sent += len(relay.first_chunk)
+        yield relay.first_chunk
+
+        while True:
+            if is_disconnected is not None and await is_disconnected():
+                disconnected = True
+                return
+            remaining_total = relay.deadline - time.monotonic()
+            if remaining_total <= 0:
+                timed_out = True
+                return
+            wait_for = min(SEGMENT_READ_IDLE_TIMEOUT, remaining_total)
+            try:
+                chunk = await asyncio.wait_for(anext(relay.iterator), timeout=max(0.05, wait_for))
+            except StopAsyncIteration:
+                completed = True
+                return
+            except (asyncio.TimeoutError, TimeoutError, httpx.TimeoutException):
+                timed_out = True
+                return
+            if not chunk:
+                continue
+            bytes_sent += len(chunk)
+            yield chunk
+    except asyncio.CancelledError:
+        disconnected = True
+        raise
+    finally:
+        _inc('segment_bytes', channel_id, bytes_sent)
+        if completed:
+            _inc('segment_completed', channel_id)
+        if disconnected:
+            _inc('segment_disconnects', channel_id)
+            _event(channel_id, 'segment-cancelled', 'Downstream playback disconnected; cancelled the compatibility segment fetch.')
+        if timed_out:
+            _inc('segment_timeouts', channel_id)
+            _inc('segment_relay_failures', channel_id)
+            _event(channel_id, 'segment-stalled', 'Compatibility segment stopped producing bytes; stale-segment watchdog closed the upstream request.')
+        await relay.response.aclose()
+        await relay.client.aclose()
+
+
+def segment_relay_headers(relay: PreparedSegmentRelay) -> dict[str, str]:
+    headers = {
+        'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0',
+        'Pragma': 'no-cache',
+        'X-IPTVMM-Segment-Relay': 'guarded',
+        'X-IPTVMM-Relay-Attempt': str(relay.attempt),
+    }
+    return headers
+
+
+def segment_relay_settings() -> dict:
+    return {
+        'connect_timeout_seconds': SEGMENT_CONNECT_TIMEOUT,
+        'first_byte_timeout_seconds': SEGMENT_FIRST_BYTE_TIMEOUT,
+        'read_idle_timeout_seconds': SEGMENT_READ_IDLE_TIMEOUT,
+        'total_timeout_seconds': SEGMENT_TOTAL_TIMEOUT,
+        'playlist_refresh_timeout_seconds': SEGMENT_PLAYLIST_REFRESH_TIMEOUT,
+        'max_attempts': SEGMENT_MAX_ATTEMPTS,
+        'chunk_bytes': SEGMENT_CHUNK_BYTES,
+    }
 
 
 def record_variant_reresolve(channel_id: int) -> None:
@@ -461,7 +738,7 @@ def proxy_stats() -> dict:
         _trim_registry(_playlist_registry, MAX_PLAYLIST_TOKENS)
         seg = len(_segment_registry)
         pl = len(_playlist_registry)
-    return {**_stats, 'cache_entries': len(_cache), 'segment_registry_entries': seg, 'playlist_registry_entries': pl}
+    return {**_stats, 'cache_entries': len(_cache), 'segment_registry_entries': seg, 'playlist_registry_entries': pl, 'relay_settings': segment_relay_settings()}
 
 
 def channel_diagnostics(channel_id: int) -> dict:
@@ -499,10 +776,11 @@ def rewrite_media_playlist(
     compatibility: bool = False,
     playlist_kind: str = 'media',
 ) -> str:
-    """Rewrite playlist references without relaying media bytes.
+    """Rewrite playlist references while leaving ordinary media URLs direct.
 
-    In compatibility mode, extensionless/unknown media URIs are replaced with short-lived local
-    URLs carrying a safe synthetic extension. The local endpoint only redirects to the provider.
+    In compatibility mode, only extensionless/unknown media URIs are replaced with short-lived
+    local URLs carrying a safe synthetic extension. v0.3.3 serves those exceptional aliases
+    through a guarded, timeout-bounded relay; normal .ts/.m4s/etc. traffic still goes direct.
     """
     if channel_id is not None:
         _note_discontinuities(channel_id, manifest, base_url)
@@ -510,19 +788,24 @@ def rewrite_media_playlist(
     suffix = _segment_suffix(manifest, playlist_kind)
     out: list[str] = []
     newest_host = None
+    media_sequence = 0
+    segment_offset = 0
     for raw in manifest.replace('\r\n', '\n').replace('\r', '\n').split('\n'):
         line = raw.strip()
         if not line:
             continue
         upper = line.upper()
         if line.startswith('#'):
+            if upper.startswith('#EXT-X-MEDIA-SEQUENCE:'):
+                media_sequence = _int_or_none(line.split(':', 1)[1].strip()) or 0
+                segment_offset = 0
             media_uri_tag = upper.startswith(('#EXT-X-MAP:', '#EXT-X-PART:', '#EXT-X-PRELOAD-HINT:'))
             if media_uri_tag and 'URI=' in upper:
                 tag_suffix = '.mp4' if upper.startswith('#EXT-X-MAP:') else suffix
                 def media_tag_uri(m):
                     absolute = urljoin(base_url, m.group(1))
                     if compatibility and channel_id is not None and local_base and _needs_segment_alias(absolute):
-                        token, is_new = register_segment_url(channel_id, absolute, tag_suffix)
+                        token, is_new = register_segment_url(channel_id, absolute, tag_suffix, playlist_url=base_url)
                         if is_new:
                             _inc('extensionless_segments', channel_id)
                             _event(channel_id, 'segment-alias', f'Created a synthetic {tag_suffix} alias for an extensionless HLS media URI.')
@@ -538,14 +821,18 @@ def rewrite_media_playlist(
         host = urlparse(absolute).hostname
         if host:
             newest_host = host
+        current_sequence = media_sequence + segment_offset
         if compatibility and channel_id is not None and local_base and _needs_segment_alias(absolute):
-            token, is_new = register_segment_url(channel_id, absolute, suffix)
+            token, is_new = register_segment_url(
+                channel_id, absolute, suffix, playlist_url=base_url, media_sequence=current_sequence,
+            )
             if is_new:
                 _inc('extensionless_segments', channel_id)
                 _event(channel_id, 'segment-alias', f'Normalized extensionless/unsupported media segment to a synthetic {suffix} URL.')
             out.append(f'{local_base}/hls/channel/{channel_id}/segment/{token}{suffix}')
         else:
             out.append(absolute)
+        segment_offset += 1
 
     if channel_id is not None and newest_host:
         old = _channel_last_cdn.get(channel_id)

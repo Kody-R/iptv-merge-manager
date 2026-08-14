@@ -1,4 +1,4 @@
-# IPTV Merge Manager v0.3.2
+# IPTV Merge Manager v0.3.3
 
 A self-hosted Docker application that combines multiple IPTV M3U/M3U8 channel lists and optional XMLTV guides into one curated master lineup.
 
@@ -25,41 +25,75 @@ A self-hosted Docker application that combines multiple IPTV M3U/M3U8 channel li
 - Refresh history in the web UI
 
 
-## v0.3.2 HLS Compatibility & Resilience
+## v0.3.3 Guarded HLS Segment Resilience
 
-v0.3.2 extends the v0.3.1 variant-lock work to handle live HLS feeds that change segment URL format at ad breaks or discontinuities. In particular, some providers switch from normal `.ts` segment URLs to extensionless `/v1/segment/...` URLs. Jellyfin FFmpeg can reject those with `is not in allowed_segment_extensions`.
+v0.3.3 keeps the v0.3.2 HLS compatibility modes and adds a selective safety relay for the exceptional media URLs that v0.3.2 normalized to synthetic `.ts`/`.m4s`/audio aliases. This specifically targets providers that hang on commercial/ad-break segments instead of returning an error.
 
-Three HLS modes are now available through a global → source → channel inheritance hierarchy:
+Normal media traffic is still direct:
 
-- **Direct** — publish the original stream URL unchanged.
-- **Playlist Compatibility** — preserve adaptive choices while routing child playlists through IPTV Merge Manager for URI normalization.
-- **Fixed Variant + Compatibility** — select one rendition (720p cap by default) and apply compatibility rewriting to that rendition.
+```text
+ordinary .ts/.m4s segment -> Jellyfin fetches provider/CDN directly
+extensionless/unsupported compatibility segment -> IPTVMM guarded relay -> provider/CDN
+```
 
-The compatibility layer still handles playlist text only. Normal media URLs remain direct to the provider/CDN. If a media playlist introduces an extensionless or unsupported segment URI, IPTV Merge Manager creates a short-lived local alias such as `/hls/channel/174/segment/<token>.ts`. Jellyfin opens the safe `.ts` URL and IPTV Merge Manager responds with an HTTP redirect to the real upstream segment; the media payload itself does not pass through the application.
+The guarded relay:
 
-v0.3.2 also adds:
+- acquires the first media bytes before committing a response to Jellyfin;
+- retries a pre-media failure a bounded number of times;
+- refreshes the same upstream media playlist on a pre-media failure and follows a replacement URL only when it still represents the exact same HLS media sequence;
+- aborts a segment that stops producing bytes;
+- enforces an overall per-attempt deadline;
+- cancels the upstream HTTP request when the downstream request disappears;
+- never restarts a segment after partial bytes were already emitted, avoiding concatenated/corrupt media;
+- adds relay/retry/timeout/cancellation diagnostics to the dashboard and per-channel HLS diagnostics.
 
-- Source-level HLS defaults plus per-channel overrides.
-- Automatic synthetic `.ts`, `.m4s`, `.mp4`, `.aac`, or `.vtt` aliases where appropriate.
-- Bounded, expiring segment and child-playlist registries.
-- Dynamic child-playlist rewriting for adaptive compatibility mode.
-- Variant re-resolution after 401/403/404/410 responses.
-- Discontinuity detection and CDN-host-change diagnostics.
-- Per-channel bounded HLS event history and runtime counters.
-- Opaque token redirects rather than a user-controlled `?url=` endpoint.
+Default safeguards are configurable through environment variables:
 
-### Recommended mode for the Jellyfin extensionless-segment issue
+```yaml
+HLS_SEGMENT_CONNECT_TIMEOUT: "4"
+HLS_SEGMENT_FIRST_BYTE_TIMEOUT: "6"
+HLS_SEGMENT_READ_IDLE_TIMEOUT: "10"
+HLS_SEGMENT_TOTAL_TIMEOUT: "20"
+HLS_SEGMENT_PLAYLIST_REFRESH_TIMEOUT: "4"
+HLS_SEGMENT_MAX_ATTEMPTS: "2"
+```
 
-Use **Fixed Variant + Compatibility** with a 720p cap. This keeps FFmpeg on one video/audio program and also normalizes extensionless segments that appear after `#EXT-X-DISCONTINUITY`.
+These controls apply only to synthetic compatibility segment aliases. They do not turn IPTV Merge Manager into a full IPTV proxy or transcoder.
 
-Existing v0.3.1 databases migrate conservatively: channels with Variant Lock enabled become **Fixed Variant + Compatibility**, and channels with it disabled remain **Direct**. Newly discovered channels inherit their source/global setting.
+## v0.3.1 Adaptive HLS Variant Lock
 
+v0.3.1 adds an opt-in playback-reliability path for adaptive HLS channels that expose multiple quality renditions and behave poorly when Jellyfin/FFmpeg opens the full master playlist.
 
-## v0.3.1 Adaptive HLS Variant Lock (historical)
+For an enabled channel, IPTV Merge Manager now:
 
-v0.3.1 introduced the original opt-in fixed-variant resolver: it resolved an adaptive master at playback time, selected one rendition, and returned a single media playlist so Jellyfin/FFmpeg saw only one video/audio program. Media segments remained direct to the provider/CDN.
+1. Keeps the provider's stable/original stream URL in SQLite.
+2. Resolves the current upstream HLS master when playback starts.
+3. Selects one rendition (720p maximum by default).
+4. Fetches only that rendition's small media playlist.
+5. Rewrites relative segment/key URIs to absolute upstream CDN URLs.
+6. Returns the rewritten playlist to Jellyfin.
+7. Leaves all `.ts`/media traffic direct between Jellyfin and the provider/CDN.
 
-v0.3.2 keeps that behavior as **Fixed Variant + Compatibility** and adds extensionless-segment normalization, source/channel inheritance, adaptive compatibility mode, and HLS diagnostics.
+This prevents Jellyfin from seeing several video/audio programs at the same time while keeping IPTV Merge Manager's CPU, RAM, and network load very small. If a master uses a separate HLS audio group, v0.3.1 returns a one-variant mini-master so that audio group is retained.
+
+### Enable it for a problem channel
+
+Open **Channel Browser → Edit** for the channel, then:
+
+- Check **Enable HLS Variant Lock for this channel**.
+- Leave **Maximum HLS quality** at **Use global default** (720p initially), or choose another cap.
+- Click **Analyze HLS** to verify available variants and which one will be selected.
+- Save the channel.
+
+You can also enable/disable variant lock or assign 720p/540p/360p caps to multiple checked channels using the Channel Browser bulk-action menu.
+
+The **Adaptive HLS Variant Lock** dashboard panel controls the global service, default quality cap, short master-manifest cache, and runtime request/error counters.
+
+### Important behavior
+
+Variant lock is **off per channel by default** after upgrading. Existing streams remain unchanged until you enable it for a channel. This avoids adding an HLS probe to every IPTV stream in a large lineup.
+
+The generated `master.m3u` uses the same host/port Jellyfin used to request the playlist when expanding internal variant-lock URLs, so normal direct-IP and CasaOS LAN usage do not require a hard-coded server address.
 
 ## Requirements
 
@@ -69,8 +103,8 @@ v0.3.2 keeps that behavior as **Fixed Variant + Compatibility** and adds extensi
 ## Install
 
 ```bash
-unzip iptv-merge-manager-v0.3.2.zip
-cd iptv-merge-manager-v0.3.2
+unzip iptv-merge-manager-v0.3.3.zip
+cd iptv-merge-manager-v0.3.3
 docker compose up -d --build
 ```
 
@@ -224,18 +258,32 @@ docker compose up -d --build
 
 The persistent `data` and `output` folders remain on the host.
 
-## v0.3.2 highlights
+## v0.3.3 highlights
 
-- Everything from the v0.3.1 adaptive HLS variant-lock release
-- Direct / Playlist Compatibility / Fixed Variant + Compatibility modes
-- Global → source → channel HLS inheritance
-- Extensionless segment normalization with safe synthetic file extensions
-- Short-lived opaque segment redirects; no media-byte relay
-- Adaptive child-playlist compatibility routing
-- Discontinuity and CDN-host-change detection
-- Variant re-resolution counters and per-channel HLS diagnostics
-- Bounded HLS event history and token registries
-- Preserved v0.3 disk-backed, low-memory architecture
+- Selective guarded relay for extensionless/unsupported HLS compatibility segments.
+- 4-second connect, 6-second first-media, 10-second read-idle, and 20-second per-attempt safeguards by default.
+- Maximum two pre-media attempts by default.
+- Mid-segment stale-data watchdog closes the segment instead of leaving FFmpeg blocked indefinitely.
+- Downstream disconnect cancellation closes the corresponding upstream HTTP request.
+- Same-media-sequence URL recovery after a failed ad/CDN segment when the refreshed playlist republishes that sequence at a new URL.
+- New relay/retry/timeout/cancellation/recovery runtime counters and channel events.
+- Ordinary `.ts`, `.m4s`, audio, key, and other recognized media URLs remain direct to the provider/CDN.
+- No FFmpeg, transcoding, or full-stream media proxy was added to IPTV Merge Manager.
+
+## v0.3.1 highlights
+
+- Channel metadata overrides
+- Bulk channel operations
+- Custom lineup groups
+- Group-based auto numbering
+- EPG match suggestions
+- Expanded dashboard
+- Configuration backup and restore
+- Per-channel adaptive HLS variant lock
+- 720p default rendition cap with per-channel overrides
+- HLS analyzer and runtime proxy counters
+- Dynamic provider-manifest re-resolution
+- Direct-to-CDN media segment delivery
 
 ## v0.3.0 low-memory architecture
 

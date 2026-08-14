@@ -3,12 +3,12 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>IPTV Merge Manager v0.3.2</title>
+  <title>IPTV Merge Manager v0.3.3</title>
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
 <header class="topbar">
-  <div><h1>IPTV Merge Manager</h1><p>v0.3.2 · HLS compatibility & resilience release</p></div>
+  <div><h1>IPTV Merge Manager</h1><p>v0.3.3 · guarded HLS segment resilience</p></div>
   <div class="top-actions"><span id="refreshState" class="muted"></span><button id="refreshAllBtn" class="primary">Refresh All</button></div>
 </header>
 <main class="page">
@@ -30,7 +30,7 @@
 </section>
 
 <section class="panel hls-panel">
-  <div class="panel-heading"><div><h2>HLS Compatibility & Variant Lock</h2><p>Rewrites only HLS playlist text. Media segments still travel directly from Jellyfin to the provider/CDN.</p></div></div>
+  <div class="panel-heading"><div><h2>HLS Compatibility & Variant Lock</h2><p>Normal media segments remain direct. Only synthetic compatibility segments use a guarded, timeout-bounded relay to prevent commercial-break stalls from hanging FFmpeg.</p></div></div>
   <form id="hlsSettingsForm" class="hls-settings hls-settings-v032">
     <label class="toggle-label"><input id="hlsProxyGlobal" type="checkbox"> Enable HLS compatibility service</label>
     <label>Global default mode<select id="hlsDefaultMode"><option value="direct">Direct</option><option value="compat">Playlist Compatibility</option><option value="fixed">Fixed Variant + Compatibility</option></select></label>
@@ -42,7 +42,11 @@
     <div><span>Proxy Requests</span><strong id="hlsRequests">0</strong></div>
     <div><span>Master Resolves</span><strong id="hlsResolves">0</strong></div>
     <div><span>Cache Hits</span><strong id="hlsCacheHits">0</strong></div>
-    <div><span>Segment Redirects</span><strong id="hlsSegmentRedirects">0</strong></div>
+    <div><span>Guarded Relays</span><strong id="hlsSegmentRelays">0</strong></div>
+    <div><span>Relay Retries</span><strong id="hlsSegmentRetries">0</strong></div>
+    <div><span>Relay Timeouts</span><strong id="hlsSegmentTimeouts">0</strong></div>
+    <div><span>Cancelled Relays</span><strong id="hlsSegmentDisconnects">0</strong></div>
+    <div><span>URL Recoveries</span><strong id="hlsSegmentRecoveries">0</strong></div>
     <div><span>Extensionless Fixed</span><strong id="hlsExtensionless">0</strong></div>
     <div><span>Discontinuities</span><strong id="hlsDiscontinuities">0</strong></div>
     <div><span>CDN Changes</span><strong id="hlsCdnSwitches">0</strong></div>
@@ -50,7 +54,8 @@
     <div><span>Bypasses</span><strong id="hlsBypasses">0</strong></div>
     <div><span>Failures</span><strong id="hlsFailures">0</strong></div>
   </div>
-  <p class="muted hls-note"><b>Direct</b> leaves the stream alone. <b>Playlist Compatibility</b> preserves adaptive choices but rewrites child playlists and extensionless media URIs. <b>Fixed Variant + Compatibility</b> also locks adaptive masters to one rendition. Existing v0.3.1 locked channels migrate to this mode.</p>
+  <p id="hlsRelayPolicy" class="muted hls-note"></p>
+  <p class="muted hls-note"><b>Direct</b> leaves the stream alone. <b>Playlist Compatibility</b> preserves adaptive choices but rewrites child playlists and extensionless media URIs. <b>Fixed Variant + Compatibility</b> also locks adaptive masters to one rendition. Existing v0.3.1 locked channels migrate to this mode. In v0.3.3, extensionless compatibility aliases are selectively relayed with hard connect/first-byte/read-idle/overall deadlines; ordinary HLS segment traffic remains direct.</p>
 </section>
 
 <section class="panel">

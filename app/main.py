@@ -28,8 +28,9 @@ from .hls_proxy import (
     build_compat_master, build_locked_master, channel_diagnostics, effective_hls_height,
     effective_hls_mode, fetch_manifest, invalidate as invalidate_hls_cache, proxy_stats,
     record_bypass, record_event, record_failure, record_playlist_request, record_request,
-    record_segment_redirect, record_variant_reresolve, resolve_master, resolve_playlist_token,
-    resolve_segment_token, rewrite_media_playlist, select_variant, VALID_HLS_MODES,
+    prepare_segment_relay, record_variant_reresolve, resolve_master,
+    resolve_playlist_token, resolve_segment_token, rewrite_media_playlist, segment_relay_headers,
+    select_variant, stream_segment_relay, VALID_HLS_MODES,
 )
 
 APP_DIR = Path(__file__).resolve().parent
@@ -112,7 +113,7 @@ async def lifespan(app: FastAPI):
     scheduler.shutdown(wait=False)
 
 
-app = FastAPI(title='IPTV Merge Manager', version='0.3.2', lifespan=lifespan)
+app = FastAPI(title='IPTV Merge Manager', version='0.3.3', lifespan=lifespan)
 app.mount('/static', StaticFiles(directory=APP_DIR / 'static'), name='static')
 templates = Jinja2Templates(directory=APP_DIR / 'templates')
 
@@ -226,7 +227,7 @@ def index(request: Request):
 
 @app.get('/health')
 def health():
-    return {'status': 'ok', 'version': '0.3.2'}
+    return {'status': 'ok', 'version': '0.3.3'}
 
 
 @app.get('/api/status')
@@ -252,7 +253,7 @@ def status():
         unnumbered = c.execute('SELECT COUNT(*) FROM channels WHERE selected=1 AND is_active=1 AND channel_number IS NULL').fetchone()[0]
         last_peak = c.execute('SELECT peak_rss_kb FROM refresh_log WHERE peak_rss_kb IS NOT NULL ORDER BY id DESC LIMIT 1').fetchone()
     return {
-        'version': '0.3.2', 'timezone': TZ_NAME, 'refresh_hours': REFRESH_HOURS,
+        'version': '0.3.3', 'timezone': TZ_NAME, 'refresh_hours': REFRESH_HOURS,
         'source_count': source_count, 'active_channels': active, 'selected_channels': selected,
         'with_epg': with_epg, 'missing_epg': missing, 'group_count': groups, 'unnumbered': unnumbered,
         'logs': logs, 'resource_profile': profile, 'default_page_size': cfg['page_size'],
@@ -756,14 +757,24 @@ async def hls_child_playlist(cid: int, token: str, request: Request):
 
 
 @app.get('/hls/channel/{cid}/segment/{token}.{suffix}')
-def hls_segment_redirect(cid: int, token: str, suffix: str):
+async def hls_segment_relay(cid: int, token: str, suffix: str, request: Request):
     entry = resolve_segment_token(cid, token)
     if not entry:
         raise HTTPException(410, 'HLS segment alias expired')
     if entry.suffix.lower() != f'.{suffix.lower()}':
         raise HTTPException(404, 'HLS segment alias extension mismatch')
-    record_segment_redirect(cid)
-    return RedirectResponse(entry.url, status_code=302, headers={'Cache-Control': 'no-store'})
+
+    try:
+        relay = await prepare_segment_relay(cid, entry)
+    except Exception as exc:
+        record_failure(cid, f'Guarded segment relay failed: {exc}')
+        raise HTTPException(504, f'HLS compatibility segment timed out or failed: {exc}')
+
+    return StreamingResponse(
+        stream_segment_relay(cid, relay, request.is_disconnected),
+        media_type=relay.content_type or 'video/mp2t',
+        headers=segment_relay_headers(relay),
+    )
 
 
 @app.get('/output/master.xml')

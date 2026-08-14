@@ -80,7 +80,7 @@ def iter_m3u(path: Path) -> Iterator[dict]:
 
 
 async def _download_to_file(url: str, destination: Path) -> None:
-    headers = {'User-Agent': 'IPTV-Merge-Manager/0.3.2'}
+    headers = {'User-Agent': 'IPTV-Merge-Manager/0.3.3'}
     timeout = httpx.Timeout(90.0, connect=20.0)
     destination.parent.mkdir(parents=True, exist_ok=True)
     tmp = destination.with_suffix(destination.suffix + '.download')
@@ -354,7 +354,7 @@ def generate_master_xml() -> tuple[int, int]:
 
     with etree.xmlfile(str(tmp), encoding='utf-8') as xf:
         xf.write_declaration()
-        with xf.element('tv', {'generator-info-name': 'IPTV Merge Manager v0.3.2'}):
+        with xf.element('tv', {'generator-info-name': 'IPTV Merge Manager v0.3.3'}):
             for tag in ('channel', 'programme'):
                 with connect() as conn:
                     source_ids = [r['source_id'] for r in conn.execute(

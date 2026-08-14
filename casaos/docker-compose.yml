@@ -2,7 +2,7 @@ name: iptv-merge-manager
 
 services:
   iptv-merge-manager:
-    image: ghcr.io/kody-r/iptv-merge-manager:0.3.2
+    image: ghcr.io/YOUR_GITHUB_USERNAME/iptv-merge-manager:0.3.3
     container_name: iptv-merge-manager
     restart: unless-stopped
     ports:
@@ -12,6 +12,12 @@ services:
     environment:
       TZ: America/New_York
       REFRESH_HOURS: "4"
+      HLS_SEGMENT_CONNECT_TIMEOUT: "4"
+      HLS_SEGMENT_FIRST_BYTE_TIMEOUT: "6"
+      HLS_SEGMENT_READ_IDLE_TIMEOUT: "10"
+      HLS_SEGMENT_TOTAL_TIMEOUT: "20"
+      HLS_SEGMENT_PLAYLIST_REFRESH_TIMEOUT: "4"
+      HLS_SEGMENT_MAX_ATTEMPTS: "2"
     volumes:
       - /DATA/AppData/iptv-merge-manager/data:/app/data
       - /DATA/AppData/iptv-merge-manager/output:/app/output
@@ -22,20 +28,20 @@ x-casaos:
   index: /
   port_map: "8080"
   scheme: http
-  icon: https://raw.githubusercontent.com/kody-r/iptv-merge-manager/main/casaos/icon.svg
+  icon: https://raw.githubusercontent.com/YOUR_GITHUB_USERNAME/iptv-merge-manager/main/casaos/icon.svg
   title:
     en_US: IPTV Merge Manager
   tagline:
     en_US: Curate multiple IPTV playlists and XMLTV guides into one lineup.
   description:
     en_US: Merge multiple M3U/M3U8 sources and optional XMLTV guides, select individual channels, sort the master lineup, assign channel numbers, and publish a single M3U and XMLTV feed for Jellyfin or other IPTV clients.
-  author: kody-r
+  author: YOUR_GITHUB_USERNAME
   developer: IPTV Merge Manager
   category: Media
   architectures:
     - amd64
     - arm64
-  version: "0.3.2"
+  version: "0.3.3"
   update_at: "2026-08-14"
   release_notes:
-    en_US: v0.3.2 adds HLS compatibility modes, extensionless-segment normalization, source/channel inheritance, bounded redirect registries, discontinuity/CDN diagnostics, and resilient fixed-variant playback without relaying media bytes.
+    en_US: v0.3.3 adds guarded selective relaying for extensionless HLS compatibility segments, hard upstream deadlines, bounded retries, same-sequence URL recovery, stale-segment aborts, and downstream-disconnect cancellation while leaving ordinary HLS media traffic direct.
