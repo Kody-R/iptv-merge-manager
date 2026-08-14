@@ -1,5 +1,22 @@
 # Changelog
 
+## v0.3.4
+
+Protected Playback reliability release:
+
+- Added a new Protected HLS mode that locks the selected rendition and routes every media segment through IPTV Merge Manager.
+- Protected segments are downloaded completely to a temporary disk file before Jellyfin receives any bytes.
+- Added atomic rename after successful whole-segment completion so partial upstream responses are never published.
+- Added whole-segment deadlines, fresh-connection retries, same-media-sequence URL recovery, and bounded failure/skip responses.
+- Added two-segment prefetch by default and single-flight request de-duplication for concurrent Jellyfin requests.
+- Added disk-backed completed-segment reuse with 512 MB default cache ceiling and 180-second default retention.
+- Added cleanup of stale cache data and abandoned temporary segment files.
+- Added Protected download/cache-hit/prefetch/timeout/retry/failure/skip/byte diagnostics.
+- Added UI controls for Protected prefetch depth, deadline, attempts, skip behavior, cache size, and retention.
+- Existing v0.3.3 Fixed channel/source/global selections migrate once to Protected on upgrade.
+- Kept Direct, Compatibility, and Fixed modes available.
+- Preserved one Uvicorn worker and disk-backed XMLTV/refresh architecture; IPTV Merge Manager still does not transcode media.
+
 ## v0.3.3
 
 Guarded HLS segment resilience patch:

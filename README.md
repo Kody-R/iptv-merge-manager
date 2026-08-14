@@ -1,4 +1,4 @@
-# IPTV Merge Manager v0.3.3
+# IPTV Merge Manager v0.3.4
 
 A self-hosted Docker application that combines multiple IPTV M3U/M3U8 channel lists and optional XMLTV guides into one curated master lineup.
 
@@ -23,6 +23,46 @@ A self-hosted Docker application that combines multiple IPTV M3U/M3U8 channel li
 - Generated `/output/master.xml`
 - XMLTV output filtered to selected TVG IDs
 - Refresh history in the web UI
+
+
+## v0.3.4 Protected Playback
+
+v0.3.4 changes the reliability strategy for problem HLS channels. Instead of exposing an upstream segment to Jellyfin while it is still downloading, **Protected Playback downloads the complete segment into a bounded disk cache first and only publishes the file after the upstream request has completed successfully**.
+
+```text
+provider/CDN -> IPTVMM temporary .part file -> validation -> atomic rename -> Jellyfin
+```
+
+If the upstream segment stalls during a commercial break, CDN transition, or SSAI discontinuity, the partial `.part` file is discarded. Jellyfin never receives the incomplete body. IPTVMM retries with a fresh connection and can refresh the same HLS media sequence to recover a changed provider URL. If the segment still cannot be acquired, IPTVMM returns a bounded failure/reload response instead of leaving FFmpeg attached to an indefinitely open request.
+
+Protected mode also:
+
+- locks adaptive masters to the configured maximum rendition, as Fixed mode does;
+- routes **all media segments** through the protected disk cache, including ordinary `.ts` URLs;
+- prefetches the newest 2 segments by default;
+- reuses completed segment files for repeated/concurrent requests;
+- defaults to a 15-second whole-segment deadline and 2 attempts;
+- defaults to a 512 MB disk-cache ceiling with 180-second retention;
+- stores segment payloads on disk rather than buffering whole streams in Python RAM;
+- exposes protected download/cache/prefetch/timeout/skip counters in the dashboard and per-channel diagnostics;
+- keeps Direct, Compatibility, and Fixed modes available for channels that do not need full protection.
+
+### Upgrade behavior
+
+Existing v0.3.3 channels, source defaults, or the global default explicitly set to **Fixed Variant + Compatibility** migrate once to **Protected Playback**. This is intentional: Fixed mode was normally enabled for the same unstable adaptive feeds v0.3.4 is designed to protect. You can switch any channel/source back to Fixed after the upgrade.
+
+### Recommended problem-channel settings
+
+- HLS mode: **Protected Playback**
+- Maximum quality: **720p** initially
+- Prefetch: **2 segments**
+- Segment deadline: **15 seconds**
+- Attempts: **2**
+- Skip/reload failed protected segments: **On**
+- Disk cache: **512 MB**
+- Cache retention: **180 seconds**
+
+Protected mode increases network traffic through IPTV Merge Manager and uses temporary disk I/O, but it still does not transcode video. The application remains a single Uvicorn worker and the large media payloads are disk-backed, with the design goal of keeping normal container RAM usage below roughly 1 GB on typical home deployments.
 
 
 ## v0.3.3 Guarded HLS Segment Resilience
@@ -103,8 +143,8 @@ The generated `master.m3u` uses the same host/port Jellyfin used to request the 
 ## Install
 
 ```bash
-unzip iptv-merge-manager-v0.3.3.zip
-cd iptv-merge-manager-v0.3.3
+unzip iptv-merge-manager-v0.3.4.zip
+cd iptv-merge-manager-v0.3.4
 docker compose up -d --build
 ```
 
@@ -257,6 +297,20 @@ docker compose up -d --build
 ```
 
 The persistent `data` and `output` folders remain on the host.
+
+## v0.3.4 highlights
+
+- New **Protected Playback** HLS mode.
+- Full segment acquisition to disk before any protected media bytes are served to Jellyfin.
+- Temporary `.part` files are atomically renamed only after complete download/validation.
+- Ordinary `.ts` segments are protected too; this is no longer limited to extensionless compatibility aliases.
+- Whole-segment deadline, bounded attempts, same-sequence URL recovery, and fresh connections.
+- Two-segment prefetch by default with single-flight de-duplication and disk-cache reuse.
+- Failed protected segments return a bounded reload/skip response instead of an indefinitely open stream.
+- 512 MB / 180-second bounded disk cache defaults; stale and over-limit files are cleaned automatically.
+- Existing v0.3.3 Fixed mode selections migrate once to Protected.
+- Direct, Compatibility, and legacy Fixed modes remain available.
+- No transcoding is performed by IPTV Merge Manager.
 
 ## v0.3.3 highlights
 

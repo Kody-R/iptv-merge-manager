@@ -370,5 +370,147 @@ class GuardedSegmentRelayTests(unittest.IsolatedAsyncioTestCase):
             await server.wait_closed()
 
 
+
+class ProtectedPlaybackTests(unittest.IsolatedAsyncioTestCase):
+    async def _server(self, responder):
+        async def handler(reader, writer):
+            try:
+                await reader.readuntil(b'\r\n\r\n')
+                await responder(writer)
+            except (asyncio.IncompleteReadError, ConnectionResetError, BrokenPipeError):
+                pass
+            finally:
+                try:
+                    writer.close()
+                    await writer.wait_closed()
+                except Exception:
+                    pass
+
+        server = await asyncio.start_server(handler, '127.0.0.1', 0)
+        port = server.sockets[0].getsockname()[1]
+        return server, f'http://127.0.0.1:{port}/segment.ts'
+
+    async def test_protected_mode_rewrites_ordinary_ts_segments(self):
+        manifest = '''#EXTM3U
+#EXT-X-TARGETDURATION:6
+#EXT-X-MEDIA-SEQUENCE:100
+#EXTINF:6.0,
+https://cdn.example.net/live/100.ts
+#EXTINF:6.0,
+https://cdn.example.net/live/101.ts
+'''
+        with patch.object(hls_proxy, '_protected_config', {**hls_proxy._protected_config, 'prefetch_depth': 0}):
+            rewritten = rewrite_media_playlist(manifest, 'https://cdn.example.net/live/index.m3u8', 9201, LOCAL, True, 'media', relay_all=True)
+        self.assertNotIn('https://cdn.example.net/live/100.ts\n', rewritten)
+        self.assertEqual(rewritten.count('/hls/channel/9201/segment/'), 2)
+        first_url = next(line for line in rewritten.splitlines() if '/segment/' in line)
+        token = first_url.rsplit('/', 1)[1].split('.', 1)[0]
+        entry = resolve_segment_token(9201, token)
+        self.assertIsNotNone(entry)
+        self.assertTrue(entry.protected)
+        self.assertEqual(entry.media_sequence, 100)
+
+    async def test_atomic_download_completes_before_file_is_served_and_then_hits_cache(self):
+        payload = (b'\x47' + b'A' * 187) * 128
+        requests = 0
+
+        async def responder(writer):
+            nonlocal requests
+            requests += 1
+            writer.write(
+                b'HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\n'
+                + f'Content-Length: {len(payload)}\r\n'.encode()
+                + b'Connection: close\r\n\r\n'
+                + payload
+            )
+            await writer.drain()
+
+        server, url = await self._server(responder)
+        try:
+            with tempfile.TemporaryDirectory() as td, \
+                 patch.object(hls_proxy, 'PROTECTED_CACHE_DIR', Path(td)), \
+                 patch.object(hls_proxy, '_protected_config', {**hls_proxy._protected_config, 'prefetch_depth': 0, 'segment_timeout': 2.0, 'retries': 1, 'retention_seconds': 180}):
+                token = 'atomic-success'
+                entry = RegistryEntry(url=url, channel_id=9202, expires_at=time.monotonic()+60, suffix='.ts', protected=True)
+                first = await hls_proxy.acquire_protected_segment(9202, token, entry)
+                self.assertTrue(first.path.exists())
+                self.assertEqual(first.path.read_bytes(), payload)
+                self.assertFalse(first.cache_hit)
+                second = await hls_proxy.acquire_protected_segment(9202, token, entry)
+                self.assertTrue(second.cache_hit)
+                self.assertEqual(requests, 1)
+        finally:
+            server.close()
+            await server.wait_closed()
+
+
+    async def test_protected_cache_cleanup_enforces_retention_and_limit(self):
+        with tempfile.TemporaryDirectory() as td, \
+             patch.object(hls_proxy, 'PROTECTED_CACHE_DIR', Path(td)), \
+             patch.object(hls_proxy, '_protected_config', {**hls_proxy._protected_config, 'cache_limit_mb': 1, 'retention_seconds': 60, 'segment_timeout': 5}):
+            root = Path(td) / '9204'
+            root.mkdir(parents=True)
+            old = root / 'old.ts'
+            old.write_bytes(b'X' * 128)
+            os_time = time.time() - 120
+            import os
+            os.utime(old, (os_time, os_time))
+            a = root / 'a.ts'; b = root / 'b.ts'
+            a.write_bytes(b'A' * 700_000); b.write_bytes(b'B' * 700_000)
+            hls_proxy._cleanup_protected_cache_sync()
+            self.assertFalse(old.exists())
+            total = sum(x.stat().st_size for x in Path(td).rglob('*') if x.is_file())
+            self.assertLessEqual(total, 900_000)
+
+    async def test_mid_segment_stall_never_publishes_partial_cache_file(self):
+        partial = (b'\x47' + b'B' * 187) * 8
+
+        async def responder(writer):
+            writer.write(b'HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\nContent-Length: 999999\r\nConnection: close\r\n\r\n' + partial)
+            await writer.drain()
+            await asyncio.sleep(0.5)
+
+        server, url = await self._server(responder)
+        try:
+            with tempfile.TemporaryDirectory() as td, \
+                 patch.object(hls_proxy, 'PROTECTED_CACHE_DIR', Path(td)), \
+                 patch.object(hls_proxy, 'SEGMENT_READ_IDLE_TIMEOUT', 0.05), \
+                 patch.object(hls_proxy, '_protected_config', {**hls_proxy._protected_config, 'prefetch_depth': 0, 'segment_timeout': 0.15, 'retries': 1, 'retention_seconds': 180}):
+                token = 'atomic-stall'
+                entry = RegistryEntry(url=url, channel_id=9203, expires_at=time.monotonic()+60, suffix='.ts', protected=True)
+                with self.assertRaises(RuntimeError):
+                    await hls_proxy.acquire_protected_segment(9203, token, entry)
+                final = Path(td) / '9203' / f'{token}.ts'
+                self.assertFalse(final.exists())
+                self.assertFalse(list(Path(td).rglob('*.part')))
+        finally:
+            server.close()
+            await server.wait_closed()
+
+
+class V034MigrationTests(unittest.TestCase):
+    def test_existing_v033_fixed_modes_migrate_once_to_protected(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            old_data, old_db = db.DATA_DIR, db.DB_PATH
+            try:
+                db.DATA_DIR = root / 'data'
+                db.DB_PATH = db.DATA_DIR / 'iptv.db'
+                db.init_db()
+                with db.connect() as conn:
+                    sid = conn.execute("INSERT INTO sources(name,m3u_kind,m3u_value,hls_mode) VALUES('Old','url','https://example.test/list.m3u','fixed')").lastrowid
+                    conn.execute("INSERT INTO channels(source_id,stable_key,name,stream_url,hls_proxy_enabled,hls_mode) VALUES(?,?,?,?,1,'fixed')", (sid,'fixed','Fixed','https://example.test/fixed.m3u8'))
+                    conn.execute("DELETE FROM app_settings WHERE key='hls_v034_protected_migrated'")
+                    conn.execute("UPDATE app_settings SET value='fixed' WHERE key='hls_proxy_default_mode'")
+                db.init_db()
+                with db.connect() as conn:
+                    self.assertEqual(conn.execute("SELECT hls_mode FROM channels WHERE stable_key='fixed'").fetchone()['hls_mode'], 'protected')
+                    self.assertEqual(conn.execute("SELECT hls_mode FROM sources WHERE id=?", (sid,)).fetchone()['hls_mode'], 'protected')
+                    self.assertEqual(conn.execute("SELECT value FROM app_settings WHERE key='hls_proxy_default_mode'").fetchone()['value'], 'protected')
+                    self.assertEqual(conn.execute("SELECT value FROM app_settings WHERE key='hls_v034_protected_migrated'").fetchone()['value'], '1')
+            finally:
+                db.DATA_DIR, db.DB_PATH = old_data, old_db
+
+
 if __name__ == '__main__':
     unittest.main()

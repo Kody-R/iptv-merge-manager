@@ -146,6 +146,22 @@ def init_db() -> None:
         conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('hls_proxy_default_height','720')")
         conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('hls_proxy_default_mode','direct')")
         conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('hls_proxy_cache_seconds','15')")
+        conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('hls_protected_prefetch','2')")
+        conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('hls_protected_segment_timeout','15')")
+        conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('hls_protected_retries','2')")
+        conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('hls_protected_skip_failed','1')")
+        conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('hls_protected_cache_limit_mb','512')")
+        conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('hls_protected_cache_retention','180')")
+
+        # v0.3.4 is reliability-first. Existing Fixed channels/sources were generally enabled
+        # to work around unstable adaptive feeds, so migrate them once to Protected mode.
+        # Users can explicitly switch back to Fixed afterward if they prefer direct CDN segments.
+        marker = conn.execute("SELECT value FROM app_settings WHERE key='hls_v034_protected_migrated'").fetchone()
+        if not marker:
+            conn.execute("UPDATE channels SET hls_mode='protected',hls_proxy_enabled=1 WHERE hls_mode='fixed'")
+            conn.execute("UPDATE sources SET hls_mode='protected' WHERE hls_mode='fixed'")
+            conn.execute("UPDATE app_settings SET value='protected' WHERE key='hls_proxy_default_mode' AND value='fixed'")
+            conn.execute("INSERT INTO app_settings(key,value) VALUES('hls_v034_protected_migrated','1')")
 
 
 def get_setting(key: str, default: str) -> str:

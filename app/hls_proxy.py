@@ -6,13 +6,15 @@ import os
 import re
 import threading
 import time
+import uuid
 from collections import defaultdict, deque
 from dataclasses import dataclass
+from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
 import httpx
 
-APP_VERSION = '0.3.3'
+APP_VERSION = '0.3.4'
 SEGMENT_CONNECT_TIMEOUT = max(1.0, float(os.getenv('HLS_SEGMENT_CONNECT_TIMEOUT', '4')))
 SEGMENT_FIRST_BYTE_TIMEOUT = max(1.0, float(os.getenv('HLS_SEGMENT_FIRST_BYTE_TIMEOUT', '6')))
 SEGMENT_READ_IDLE_TIMEOUT = max(1.0, float(os.getenv('HLS_SEGMENT_READ_IDLE_TIMEOUT', '10')))
@@ -34,7 +36,16 @@ DEFAULT_USER_AGENT = os.getenv(
     'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
 )
 
-VALID_HLS_MODES = {'direct', 'compat', 'fixed'}
+PROTECTED_CACHE_DIR = Path(os.getenv('HLS_PROTECTED_CACHE_DIR', '/app/data/cache/hls-segments'))
+PROTECTED_DEFAULT_PREFETCH = max(0, min(8, int(os.getenv('HLS_PROTECTED_PREFETCH', '2'))))
+PROTECTED_DEFAULT_TIMEOUT = max(5.0, float(os.getenv('HLS_PROTECTED_SEGMENT_TIMEOUT', '15')))
+PROTECTED_DEFAULT_RETRIES = max(1, min(4, int(os.getenv('HLS_PROTECTED_RETRIES', '2'))))
+PROTECTED_DEFAULT_CACHE_LIMIT_MB = max(64, min(4096, int(os.getenv('HLS_PROTECTED_CACHE_LIMIT_MB', '512'))))
+PROTECTED_DEFAULT_RETENTION = max(30, min(3600, int(os.getenv('HLS_PROTECTED_CACHE_RETENTION', '180'))))
+PROTECTED_DEFAULT_SKIP_FAILED = os.getenv('HLS_PROTECTED_SKIP_FAILED', '1').strip().lower() not in {'0', 'false', 'no', 'off'}
+PROTECTED_MAX_SEGMENT_BYTES = max(4 * 1024 * 1024, min(256 * 1024 * 1024, int(os.getenv('HLS_PROTECTED_MAX_SEGMENT_BYTES', str(64 * 1024 * 1024)))))
+
+VALID_HLS_MODES = {'direct', 'compat', 'fixed', 'protected'}
 ATTR_RE = re.compile(r'([A-Z0-9-]+)=(?:"([^"]*)"|([^,]*))', re.I)
 URI_ATTR_RE = re.compile(r'URI="([^"]+)"', re.I)
 SAFE_MEDIA_EXTENSIONS = {
@@ -79,6 +90,8 @@ class RegistryEntry:
     suffix: str = '.ts'
     playlist_url: str | None = None
     media_sequence: int | None = None
+    protected: bool = False
+    mode: str = 'compat'
 
 
 @dataclass
@@ -92,6 +105,16 @@ class PreparedSegmentRelay:
     final_url: str
     content_type: str
     content_length: str | None
+
+
+@dataclass(frozen=True)
+class ProtectedSegmentResult:
+    path: Path
+    content_type: str
+    size: int
+    attempt: int
+    final_url: str
+    cache_hit: bool = False
 
 
 _cache: dict[str, CacheEntry] = {}
@@ -116,6 +139,18 @@ _stats = {
     'segment_playlist_refreshes': 0,
     'segment_url_recoveries': 0,
     'segment_bytes': 0,
+    'protected_requests': 0,
+    'protected_downloads': 0,
+    'protected_cache_hits': 0,
+    'protected_prefetches': 0,
+    'protected_prefetch_failures': 0,
+    'protected_retries': 0,
+    'protected_timeouts': 0,
+    'protected_failures': 0,
+    'protected_skips': 0,
+    'protected_completed': 0,
+    'protected_bytes': 0,
+    'protected_invalid': 0,
     'extensionless_segments': 0,
     'discontinuities': 0,
     'cdn_switches': 0,
@@ -125,6 +160,19 @@ _channel_stats: dict[int, dict[str, int]] = defaultdict(lambda: defaultdict(int)
 _channel_events: dict[int, deque[dict]] = defaultdict(lambda: deque(maxlen=EVENT_HISTORY_LIMIT))
 _channel_last_cdn: dict[int, str] = {}
 _channel_discontinuity_sigs: dict[int, deque[str]] = defaultdict(lambda: deque(maxlen=32))
+_protected_config = {
+    'prefetch_depth': PROTECTED_DEFAULT_PREFETCH,
+    'segment_timeout': PROTECTED_DEFAULT_TIMEOUT,
+    'retries': PROTECTED_DEFAULT_RETRIES,
+    'cache_limit_mb': PROTECTED_DEFAULT_CACHE_LIMIT_MB,
+    'retention_seconds': PROTECTED_DEFAULT_RETENTION,
+    'skip_failed': PROTECTED_DEFAULT_SKIP_FAILED,
+}
+_protected_inflight: dict[tuple[int, str], asyncio.Task] = {}
+_protected_inflight_lock = asyncio.Lock()
+_protected_prefetch_tasks: set[asyncio.Task] = set()
+_protected_prefetch_semaphore = asyncio.Semaphore(4)
+_protected_last_cleanup = 0.0
 
 
 def _parse_attrs(line: str) -> dict[str, str]:
@@ -250,6 +298,7 @@ def register_segment_url(
     suffix: str = '.ts',
     playlist_url: str | None = None,
     media_sequence: int | None = None,
+    protected: bool = False,
 ) -> tuple[str, bool]:
     if not is_http_url(url):
         raise ValueError('Only HTTP/HTTPS segment URLs can be registered')
@@ -261,7 +310,7 @@ def register_segment_url(
         is_new = token not in _segment_registry
         _segment_registry[token] = RegistryEntry(
             url, channel_id, now + SEGMENT_TOKEN_TTL, suffix=suffix,
-            playlist_url=playlist_url, media_sequence=media_sequence,
+            playlist_url=playlist_url, media_sequence=media_sequence, protected=protected,
         )
     return token, is_new
 
@@ -275,14 +324,14 @@ def resolve_segment_token(channel_id: int, token: str) -> RegistryEntry | None:
         return entry
 
 
-def register_playlist_url(channel_id: int, url: str, kind: str = 'media') -> str:
+def register_playlist_url(channel_id: int, url: str, kind: str = 'media', mode: str = 'compat') -> str:
     if not is_http_url(url):
         raise ValueError('Only HTTP/HTTPS playlist URLs can be registered')
     token = _token(channel_id, url, 'playlist')
     now = time.monotonic()
     with _registry_lock:
         _trim_registry(_playlist_registry, MAX_PLAYLIST_TOKENS)
-        _playlist_registry[token] = RegistryEntry(url, channel_id, now + PLAYLIST_TOKEN_TTL, kind=kind, suffix='.m3u8')
+        _playlist_registry[token] = RegistryEntry(url, channel_id, now + PLAYLIST_TOKEN_TTL, kind=kind, suffix='.m3u8', mode=mode)
     return token
 
 
@@ -295,8 +344,8 @@ def resolve_playlist_token(channel_id: int, token: str) -> RegistryEntry | None:
         return entry
 
 
-def _local_playlist_url(local_base: str, channel_id: int, upstream: str, kind: str = 'media') -> str:
-    token = register_playlist_url(channel_id, upstream, kind)
+def _local_playlist_url(local_base: str, channel_id: int, upstream: str, kind: str = 'media', mode: str = 'compat') -> str:
+    token = register_playlist_url(channel_id, upstream, kind, mode)
     return f'{local_base}/hls/channel/{channel_id}/playlist/{token}.m3u8'
 
 
@@ -326,7 +375,7 @@ def _rewrite_uri_attr_absolute(line: str, base_url: str) -> str:
     return URI_ATTR_RE.sub(lambda m: f'URI="{urljoin(base_url, m.group(1))}"', line)
 
 
-def build_compat_master(manifest: str, base_url: str, channel_id: int, local_base: str) -> str:
+def build_compat_master(manifest: str, base_url: str, channel_id: int, local_base: str, mode: str = 'compat') -> str:
     """Keep adaptive choices while routing child playlists back through the lightweight compatibility layer."""
     out: list[str] = []
     expect_variant = False
@@ -344,18 +393,18 @@ def build_compat_master(manifest: str, base_url: str, channel_id: int, local_bas
                 attrs = _parse_attrs(line)
                 kind = {'SUBTITLES': 'subtitle', 'AUDIO': 'audio'}.get(attrs.get('TYPE', '').upper(), 'media')
                 line = URI_ATTR_RE.sub(
-                    lambda m: f'URI="{_local_playlist_url(local_base, channel_id, urljoin(base_url, m.group(1)), kind)}"',
+                    lambda m: f'URI="{_local_playlist_url(local_base, channel_id, urljoin(base_url, m.group(1)), kind, mode)}"',
                     line,
                 )
             elif upper.startswith('#EXT-X-I-FRAME-STREAM-INF:') and 'URI=' in upper:
                 line = URI_ATTR_RE.sub(
-                    lambda m: f'URI="{_local_playlist_url(local_base, channel_id, urljoin(base_url, m.group(1)), "media")}"',
+                    lambda m: f'URI="{_local_playlist_url(local_base, channel_id, urljoin(base_url, m.group(1)), "media", mode)}"',
                     line,
                 )
             out.append(line)
             continue
         if expect_variant:
-            out.append(_local_playlist_url(local_base, channel_id, urljoin(base_url, line), 'media'))
+            out.append(_local_playlist_url(local_base, channel_id, urljoin(base_url, line), 'media', mode))
             expect_variant = False
         else:
             out.append(urljoin(base_url, line))
@@ -368,6 +417,7 @@ def build_locked_master(
     selected: Variant,
     channel_id: int | None = None,
     local_base: str | None = None,
+    mode: str = 'fixed',
 ) -> str:
     lines = [line.strip() for line in manifest.replace('\r\n', '\n').replace('\r', '\n').split('\n')]
     version_lines = [line for line in lines if line.upper().startswith('#EXT-X-VERSION:')]
@@ -389,7 +439,7 @@ def build_locked_master(
         if channel_id is not None and local_base and 'URI=' in line.upper():
             kind = {'SUBTITLES': 'subtitle', 'AUDIO': 'audio'}.get(media_type, 'media')
             line = URI_ATTR_RE.sub(
-                lambda m: f'URI="{_local_playlist_url(local_base, channel_id, urljoin(base_url, m.group(1)), kind)}"',
+                lambda m: f'URI="{_local_playlist_url(local_base, channel_id, urljoin(base_url, m.group(1)), kind, mode)}"',
                 line,
             )
         else:
@@ -405,7 +455,7 @@ def build_locked_master(
     out.extend(media_lines)
     out.append(selected.info_line)
     if channel_id is not None and local_base:
-        out.append(_local_playlist_url(local_base, channel_id, selected.absolute_uri, 'media'))
+        out.append(_local_playlist_url(local_base, channel_id, selected.absolute_uri, 'media', mode))
     else:
         out.append(selected.absolute_uri)
     return '\n'.join(out) + '\n'
@@ -478,7 +528,7 @@ def record_playlist_request(channel_id: int) -> None:
 
 
 def record_segment_redirect(channel_id: int) -> None:
-    # Kept for API/backward compatibility with v0.3.2 diagnostics. v0.3.3 no longer
+    # Kept for API/backward compatibility with v0.3.2 diagnostics. v0.3.3+ no longer
     # redirects synthetic segment aliases; those aliases use the guarded relay below.
     _inc('segment_redirects', channel_id)
 
@@ -717,6 +767,271 @@ def segment_relay_settings() -> dict:
     }
 
 
+
+def configure_protected(
+    prefetch_depth: int | None = None,
+    segment_timeout: float | None = None,
+    retries: int | None = None,
+    cache_limit_mb: int | None = None,
+    retention_seconds: int | None = None,
+    skip_failed: bool | None = None,
+) -> dict:
+    if prefetch_depth is not None:
+        _protected_config['prefetch_depth'] = max(0, min(8, int(prefetch_depth)))
+    if segment_timeout is not None:
+        _protected_config['segment_timeout'] = max(5.0, min(60.0, float(segment_timeout)))
+    if retries is not None:
+        _protected_config['retries'] = max(1, min(4, int(retries)))
+    if cache_limit_mb is not None:
+        _protected_config['cache_limit_mb'] = max(64, min(4096, int(cache_limit_mb)))
+    if retention_seconds is not None:
+        _protected_config['retention_seconds'] = max(30, min(3600, int(retention_seconds)))
+    if skip_failed is not None:
+        _protected_config['skip_failed'] = bool(skip_failed)
+    return protected_settings()
+
+
+def protected_settings() -> dict:
+    return {**_protected_config, 'cache_directory': str(PROTECTED_CACHE_DIR), 'max_segment_bytes': PROTECTED_MAX_SEGMENT_BYTES}
+
+
+def _protected_cache_path(channel_id: int, token: str, suffix: str) -> Path:
+    safe_suffix = suffix if suffix.startswith('.') and len(suffix) <= 12 else '.bin'
+    return PROTECTED_CACHE_DIR / str(channel_id) / f'{token}{safe_suffix}'
+
+
+def _protected_content_type(entry: RegistryEntry) -> str:
+    suffix = entry.suffix.lower()
+    return {
+        '.ts': 'video/mp2t', '.m2ts': 'video/mp2t', '.mts': 'video/mp2t',
+        '.m4s': 'video/iso.segment', '.mp4': 'video/mp4', '.m4a': 'audio/mp4',
+        '.aac': 'audio/aac', '.mp3': 'audio/mpeg', '.vtt': 'text/vtt',
+        '.webvtt': 'text/vtt', '.key': 'application/octet-stream', '.bin': 'application/octet-stream',
+    }.get(suffix, 'application/octet-stream')
+
+
+def _validate_protected_file(path: Path, entry: RegistryEntry, expected_length: int | None) -> int:
+    size = path.stat().st_size
+    if size <= 0:
+        raise RuntimeError('Upstream segment completed with zero bytes')
+    if size > PROTECTED_MAX_SEGMENT_BYTES:
+        raise RuntimeError(f'Upstream segment exceeded the {PROTECTED_MAX_SEGMENT_BYTES // 1024 // 1024} MiB safety limit')
+    if expected_length is not None and expected_length >= 0 and size != expected_length:
+        raise RuntimeError(f'Upstream segment ended early ({size} of {expected_length} bytes)')
+    # MPEG-TS packets are 188 bytes. A real segment can contain leading metadata or be encrypted,
+    # so v0.3.4 treats sync detection as a sanity check only when obvious rather than rejecting
+    # valid encrypted/provider-specific segments. The hard correctness check is complete download.
+    if entry.suffix.lower() in {'.ts', '.m2ts', '.mts'} and size < 188:
+        raise RuntimeError('MPEG-TS segment is too small to contain a complete transport packet')
+    return size
+
+
+async def _download_protected_segment(channel_id: int, token: str, entry: RegistryEntry) -> ProtectedSegmentResult:
+    PROTECTED_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    target = _protected_cache_path(channel_id, token, entry.suffix)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    current_url = entry.url
+    retries = int(_protected_config['retries'])
+    total_timeout = float(_protected_config['segment_timeout'])
+    last_exc: Exception | None = None
+
+    for attempt in range(1, retries + 1):
+        tmp = target.with_name(target.name + f'.{uuid.uuid4().hex}.part')
+        response: httpx.Response | None = None
+        client = httpx.AsyncClient(
+            follow_redirects=True,
+            timeout=httpx.Timeout(connect=min(SEGMENT_CONNECT_TIMEOUT, total_timeout), read=min(SEGMENT_READ_IDLE_TIMEOUT, total_timeout), write=total_timeout, pool=min(SEGMENT_CONNECT_TIMEOUT, total_timeout)),
+            headers=_segment_request_headers(),
+            limits=httpx.Limits(max_connections=2, max_keepalive_connections=0),
+        )
+        try:
+            async with asyncio.timeout(total_timeout):
+                request = client.build_request('GET', current_url)
+                response = await client.send(request, stream=True)
+                response.raise_for_status()
+                length_header = response.headers.get('content-length')
+                try:
+                    expected_length = int(length_header) if length_header is not None else None
+                except ValueError:
+                    expected_length = None
+                written = 0
+                with tmp.open('wb') as fh:
+                    async for chunk in response.aiter_bytes(SEGMENT_CHUNK_BYTES):
+                        if not chunk:
+                            continue
+                        written += len(chunk)
+                        if written > PROTECTED_MAX_SEGMENT_BYTES:
+                            raise RuntimeError('Upstream segment exceeded protected-cache segment size limit')
+                        fh.write(chunk)
+                size = _validate_protected_file(tmp, entry, expected_length)
+                os.replace(tmp, target)
+                _inc('protected_downloads', channel_id)
+                _inc('protected_completed', channel_id)
+                _inc('protected_bytes', channel_id, size)
+                if attempt > 1:
+                    _event(channel_id, 'protected-recovered', f'Protected segment completed atomically on attempt {attempt}.')
+                result = ProtectedSegmentResult(
+                    path=target, content_type=response.headers.get('content-type') or _protected_content_type(entry),
+                    size=size, attempt=attempt, final_url=str(response.url), cache_hit=False,
+                )
+                asyncio.create_task(_maybe_cleanup_protected_cache())
+                return result
+        except asyncio.CancelledError:
+            raise
+        except (asyncio.TimeoutError, TimeoutError, httpx.TimeoutException) as exc:
+            last_exc = exc
+            _inc('protected_timeouts', channel_id)
+            _event(channel_id, 'protected-timeout', f'Protected segment exceeded its {total_timeout:g}s atomic-download deadline on attempt {attempt}.')
+        except Exception as exc:
+            last_exc = exc
+            if isinstance(exc, RuntimeError):
+                _inc('protected_invalid', channel_id)
+        finally:
+            try:
+                if response is not None:
+                    await response.aclose()
+            finally:
+                await client.aclose()
+            try:
+                tmp.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+        if attempt < retries:
+            candidate = await refresh_segment_candidate(channel_id, entry, current_url)
+            if candidate:
+                current_url = candidate
+            _inc('protected_retries', channel_id)
+            _event(channel_id, 'protected-retry', f'Retrying protected segment ({attempt + 1}/{retries}) with a fresh upstream connection.')
+            await asyncio.sleep(0.10)
+
+    _inc('protected_failures', channel_id)
+    if _protected_config['skip_failed']:
+        _inc('protected_skips', channel_id)
+        _event(channel_id, 'protected-skip', 'Protected segment could not be acquired atomically; returning a bounded failure so the HLS client can reload/skip instead of hanging.')
+    raise RuntimeError(str(last_exc or 'protected segment download failed'))
+
+
+async def acquire_protected_segment(channel_id: int, token: str, entry: RegistryEntry) -> ProtectedSegmentResult:
+    _inc('protected_requests', channel_id)
+    target = _protected_cache_path(channel_id, token, entry.suffix)
+    retention = int(_protected_config['retention_seconds'])
+    try:
+        age = time.time() - target.stat().st_mtime
+        if target.is_file() and target.stat().st_size > 0 and age <= retention:
+            _inc('protected_cache_hits', channel_id)
+            return ProtectedSegmentResult(target, _protected_content_type(entry), target.stat().st_size, 0, entry.url, True)
+    except FileNotFoundError:
+        pass
+
+    key = (channel_id, token)
+    async with _protected_inflight_lock:
+        task = _protected_inflight.get(key)
+        if task is None or task.done():
+            task = asyncio.create_task(_download_protected_segment(channel_id, token, entry))
+            _protected_inflight[key] = task
+    try:
+        result = await asyncio.shield(task)
+        return result
+    finally:
+        if task.done():
+            async with _protected_inflight_lock:
+                if _protected_inflight.get(key) is task:
+                    _protected_inflight.pop(key, None)
+
+
+async def _prefetch_one(channel_id: int, token: str) -> None:
+    entry = resolve_segment_token(channel_id, token)
+    if not entry or not entry.protected:
+        return
+    try:
+        async with _protected_prefetch_semaphore:
+            await acquire_protected_segment(channel_id, token, entry)
+        _inc('protected_prefetches', channel_id)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        _inc('protected_prefetch_failures', channel_id)
+
+
+def schedule_protected_prefetch(channel_id: int, tokens: list[str]) -> None:
+    depth = int(_protected_config['prefetch_depth'])
+    if depth <= 0 or not tokens:
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    for token in tokens[-depth:]:
+        task = loop.create_task(_prefetch_one(channel_id, token))
+        _protected_prefetch_tasks.add(task)
+        task.add_done_callback(_protected_prefetch_tasks.discard)
+
+
+def _cleanup_protected_cache_sync() -> None:
+    global _protected_last_cleanup
+    root = PROTECTED_CACHE_DIR
+    if not root.exists():
+        _protected_last_cleanup = time.monotonic()
+        return
+    now = time.time()
+    retention = int(_protected_config['retention_seconds'])
+    limit = int(_protected_config['cache_limit_mb']) * 1024 * 1024
+    files: list[tuple[float, int, Path]] = []
+    total = 0
+    for path in root.rglob('*'):
+        if not path.is_file():
+            continue
+        try:
+            st = path.stat()
+        except FileNotFoundError:
+            continue
+        if path.name.endswith('.part'):
+            if now - st.st_mtime > max(30, int(_protected_config['segment_timeout']) * 2):
+                try:
+                    path.unlink()
+                except FileNotFoundError:
+                    pass
+            continue
+        if now - st.st_mtime > retention:
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+            continue
+        files.append((st.st_mtime, st.st_size, path))
+        total += st.st_size
+    if total > limit:
+        target = int(limit * 0.90)
+        for _, size, path in sorted(files):
+            if total <= target:
+                break
+            try:
+                path.unlink()
+                total -= size
+            except FileNotFoundError:
+                pass
+    _protected_last_cleanup = time.monotonic()
+
+
+async def _maybe_cleanup_protected_cache(force: bool = False) -> None:
+    if not force and time.monotonic() - _protected_last_cleanup < 30:
+        return
+    try:
+        await asyncio.to_thread(_cleanup_protected_cache_sync)
+    except Exception:
+        pass
+
+
+def protected_segment_headers(result: ProtectedSegmentResult) -> dict[str, str]:
+    return {
+        'Cache-Control': 'private, max-age=30',
+        'X-IPTVMM-Segment-Relay': 'protected-atomic',
+        'X-IPTVMM-Protected-Cache': 'HIT' if result.cache_hit else 'MISS',
+        'X-IPTVMM-Protected-Attempt': str(result.attempt),
+    }
+
+
 def record_variant_reresolve(channel_id: int) -> None:
     _inc('variant_reresolves', channel_id)
     _event(channel_id, 'variant-reresolve', 'Selected rendition expired; refreshed the upstream master and selected it again.')
@@ -775,12 +1090,13 @@ def rewrite_media_playlist(
     local_base: str | None = None,
     compatibility: bool = False,
     playlist_kind: str = 'media',
+    relay_all: bool = False,
 ) -> str:
     """Rewrite playlist references while leaving ordinary media URLs direct.
 
-    In compatibility mode, only extensionless/unknown media URIs are replaced with short-lived
-    local URLs carrying a safe synthetic extension. v0.3.3 serves those exceptional aliases
-    through a guarded, timeout-bounded relay; normal .ts/.m4s/etc. traffic still goes direct.
+    Compatibility mode aliases only extensionless/unknown media URIs. Protected mode sets
+    relay_all=True, so every media segment is registered behind an atomic disk-backed local URL.
+    Jellyfin never receives protected bytes until the upstream segment has fully completed.
     """
     if channel_id is not None:
         _note_discontinuities(channel_id, manifest, base_url)
@@ -790,6 +1106,7 @@ def rewrite_media_playlist(
     newest_host = None
     media_sequence = 0
     segment_offset = 0
+    protected_tokens: list[str] = []
     for raw in manifest.replace('\r\n', '\n').replace('\r', '\n').split('\n'):
         line = raw.strip()
         if not line:
@@ -804,9 +1121,11 @@ def rewrite_media_playlist(
                 tag_suffix = '.mp4' if upper.startswith('#EXT-X-MAP:') else suffix
                 def media_tag_uri(m):
                     absolute = urljoin(base_url, m.group(1))
-                    if compatibility and channel_id is not None and local_base and _needs_segment_alias(absolute):
-                        token, is_new = register_segment_url(channel_id, absolute, tag_suffix, playlist_url=base_url)
-                        if is_new:
+                    if compatibility and channel_id is not None and local_base and (relay_all or _needs_segment_alias(absolute)):
+                        token, is_new = register_segment_url(channel_id, absolute, tag_suffix, playlist_url=base_url, protected=relay_all)
+                        if relay_all:
+                            protected_tokens.append(token)
+                        if is_new and _needs_segment_alias(absolute):
                             _inc('extensionless_segments', channel_id)
                             _event(channel_id, 'segment-alias', f'Created a synthetic {tag_suffix} alias for an extensionless HLS media URI.')
                         return f'URI="{local_base}/hls/channel/{channel_id}/segment/{token}{tag_suffix}"'
@@ -822,11 +1141,13 @@ def rewrite_media_playlist(
         if host:
             newest_host = host
         current_sequence = media_sequence + segment_offset
-        if compatibility and channel_id is not None and local_base and _needs_segment_alias(absolute):
+        if compatibility and channel_id is not None and local_base and (relay_all or _needs_segment_alias(absolute)):
             token, is_new = register_segment_url(
-                channel_id, absolute, suffix, playlist_url=base_url, media_sequence=current_sequence,
+                channel_id, absolute, suffix, playlist_url=base_url, media_sequence=current_sequence, protected=relay_all,
             )
-            if is_new:
+            if relay_all:
+                protected_tokens.append(token)
+            if is_new and _needs_segment_alias(absolute):
                 _inc('extensionless_segments', channel_id)
                 _event(channel_id, 'segment-alias', f'Normalized extensionless/unsupported media segment to a synthetic {suffix} URL.')
             out.append(f'{local_base}/hls/channel/{channel_id}/segment/{token}{suffix}')
@@ -840,6 +1161,8 @@ def rewrite_media_playlist(
             _inc('cdn_switches', channel_id)
             _event(channel_id, 'cdn-switch', f'Upstream media CDN changed from {old} to {newest_host}.')
         _channel_last_cdn[channel_id] = newest_host
+    if relay_all and channel_id is not None and protected_tokens:
+        schedule_protected_prefetch(channel_id, protected_tokens)
     return '\n'.join(out) + '\n'
 
 

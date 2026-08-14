@@ -96,7 +96,7 @@ tbody tr:hover { background: #182131; }
 @media(max-width:900px){.hls-settings,.hls-editor{grid-template-columns:1fr 1fr}}
 @media(max-width:600px){.hls-settings,.hls-editor{grid-template-columns:1fr}}
 
-/* v0.3.3 HLS compatibility & resilience */
+/* v0.3.4 HLS protected playback */
 .hls-settings-v032{grid-template-columns:minmax(220px,1.3fr) minmax(190px,1fr) minmax(175px,.9fr) minmax(140px,.65fr) auto}
 .source-hls-controls{display:grid;grid-template-columns:minmax(125px,1fr) minmax(110px,.85fr) auto;gap:6px;min-width:360px}.source-hls-controls button{padding:7px 9px}.source-hls-controls select{padding:7px 8px}.hls-button-row{display:flex;gap:7px;align-items:end}.hls-button-row button{flex:1}.hls-editor{grid-template-columns:1.1fr 1fr 1.1fr}.hls-analysis b{color:var(--text)}
 @media(max-width:1100px){.hls-settings-v032{grid-template-columns:1fr 1fr}.source-hls-controls{min-width:300px}}

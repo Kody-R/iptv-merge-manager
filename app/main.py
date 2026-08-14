@@ -28,7 +28,8 @@ from .hls_proxy import (
     build_compat_master, build_locked_master, channel_diagnostics, effective_hls_height,
     effective_hls_mode, fetch_manifest, invalidate as invalidate_hls_cache, proxy_stats,
     record_bypass, record_event, record_failure, record_playlist_request, record_request,
-    prepare_segment_relay, record_variant_reresolve, resolve_master,
+    acquire_protected_segment, configure_protected, prepare_segment_relay, protected_segment_headers,
+    protected_settings, record_variant_reresolve, resolve_master,
     resolve_playlist_token, resolve_segment_token, rewrite_media_playlist, segment_relay_headers,
     select_variant, stream_segment_relay, VALID_HLS_MODES,
 )
@@ -113,7 +114,7 @@ async def lifespan(app: FastAPI):
     scheduler.shutdown(wait=False)
 
 
-app = FastAPI(title='IPTV Merge Manager', version='0.3.3', lifespan=lifespan)
+app = FastAPI(title='IPTV Merge Manager', version='0.3.4', lifespan=lifespan)
 app.mount('/static', StaticFiles(directory=APP_DIR / 'static'), name='static')
 templates = Jinja2Templates(directory=APP_DIR / 'templates')
 
@@ -165,11 +166,28 @@ class HlsProxySettingsPatch(BaseModel):
     default_mode: str = 'direct'
     default_max_height: int = 720
     cache_seconds: int = 15
+    protected_prefetch: int = 2
+    protected_segment_timeout: float = 15.0
+    protected_retries: int = 2
+    protected_skip_failed: bool = True
+    protected_cache_limit_mb: int = 512
+    protected_cache_retention: int = 180
 
 
 class SourceHlsPatch(BaseModel):
     mode: str = 'inherit'
     max_height: int | None = None
+
+
+def _sync_protected_runtime() -> dict:
+    return configure_protected(
+        prefetch_depth=int(get_setting('hls_protected_prefetch', '2')),
+        segment_timeout=float(get_setting('hls_protected_segment_timeout', '15')),
+        retries=int(get_setting('hls_protected_retries', '2')),
+        skip_failed=get_setting('hls_protected_skip_failed', '1') == '1',
+        cache_limit_mb=int(get_setting('hls_protected_cache_limit_mb', '512')),
+        retention_seconds=int(get_setting('hls_protected_cache_retention', '180')),
+    )
 
 
 def _read_proc_kb(field: str) -> int | None:
@@ -227,7 +245,7 @@ def index(request: Request):
 
 @app.get('/health')
 def health():
-    return {'status': 'ok', 'version': '0.3.3'}
+    return {'status': 'ok', 'version': '0.3.4'}
 
 
 @app.get('/api/status')
@@ -253,7 +271,7 @@ def status():
         unnumbered = c.execute('SELECT COUNT(*) FROM channels WHERE selected=1 AND is_active=1 AND channel_number IS NULL').fetchone()[0]
         last_peak = c.execute('SELECT peak_rss_kb FROM refresh_log WHERE peak_rss_kb IS NOT NULL ORDER BY id DESC LIMIT 1').fetchone()
     return {
-        'version': '0.3.3', 'timezone': TZ_NAME, 'refresh_hours': REFRESH_HOURS,
+        'version': '0.3.4', 'timezone': TZ_NAME, 'refresh_hours': REFRESH_HOURS,
         'source_count': source_count, 'active_channels': active, 'selected_channels': selected,
         'with_epg': with_epg, 'missing_epg': missing, 'group_count': groups, 'unnumbered': unnumbered,
         'logs': logs, 'resource_profile': profile, 'default_page_size': cfg['page_size'],
@@ -262,6 +280,7 @@ def status():
             'default_mode': get_setting('hls_proxy_default_mode', 'direct'),
             'default_max_height': int(get_setting('hls_proxy_default_height', '720')),
             'cache_seconds': int(get_setting('hls_proxy_cache_seconds', '15')),
+            'protected': _sync_protected_runtime(),
             **proxy_stats(),
         },
         'memory': {
@@ -293,12 +312,24 @@ async def set_hls_proxy_settings(req: HlsProxySettingsPatch):
         raise HTTPException(400, 'Unknown HLS mode')
     height = max(0, min(4320, int(req.default_max_height)))
     cache_seconds = max(1, min(300, int(req.cache_seconds)))
+    protected_prefetch = max(0, min(8, int(req.protected_prefetch)))
+    protected_segment_timeout = max(5.0, min(60.0, float(req.protected_segment_timeout)))
+    protected_retries = max(1, min(4, int(req.protected_retries)))
+    protected_cache_limit_mb = max(64, min(4096, int(req.protected_cache_limit_mb)))
+    protected_cache_retention = max(30, min(3600, int(req.protected_cache_retention)))
     set_setting('hls_proxy_enabled', '1' if req.enabled else '0')
     set_setting('hls_proxy_default_mode', mode)
     set_setting('hls_proxy_default_height', str(height))
     set_setting('hls_proxy_cache_seconds', str(cache_seconds))
+    set_setting('hls_protected_prefetch', str(protected_prefetch))
+    set_setting('hls_protected_segment_timeout', str(protected_segment_timeout))
+    set_setting('hls_protected_retries', str(protected_retries))
+    set_setting('hls_protected_skip_failed', '1' if req.protected_skip_failed else '0')
+    set_setting('hls_protected_cache_limit_mb', str(protected_cache_limit_mb))
+    set_setting('hls_protected_cache_retention', str(protected_cache_retention))
+    protected = _sync_protected_runtime()
     await regenerate_outputs()
-    return {'ok': True, 'enabled': req.enabled, 'default_mode': mode, 'default_max_height': height, 'cache_seconds': cache_seconds}
+    return {'ok': True, 'enabled': req.enabled, 'default_mode': mode, 'default_max_height': height, 'cache_seconds': cache_seconds, 'protected': protected}
 
 
 @app.get('/api/sources')
@@ -433,7 +464,7 @@ async def edit_channel(cid: int, e: ChannelEdit):
             mode = 'fixed' if e.hls_proxy_enabled else 'direct'
         if mode not in ({None} | VALID_HLS_MODES):
             raise HTTPException(400, 'Unknown channel HLS mode')
-        proxy_enabled = 1 if mode in {'compat', 'fixed'} else 0
+        proxy_enabled = 1 if mode in {'compat', 'fixed', 'protected'} else 0
         max_height = old['hls_max_height']
         if 'hls_max_height' in e.model_fields_set:
             max_height = e.hls_max_height if e.hls_max_height is not None and e.hls_max_height >= 0 else None
@@ -455,6 +486,7 @@ async def bulk(req: BulkAction):
     elif req.action == 'hls-proxy-on': field = 'hls_mode'; value = 'fixed'
     elif req.action == 'hls-proxy-off': field = 'hls_mode'; value = 'direct'
     elif req.action == 'hls-mode-fixed': field = 'hls_mode'; value = 'fixed'
+    elif req.action == 'hls-mode-protected': field = 'hls_mode'; value = 'protected'
     elif req.action == 'hls-mode-compat': field = 'hls_mode'; value = 'compat'
     elif req.action == 'hls-mode-direct': field = 'hls_mode'; value = 'direct'
     elif req.action == 'hls-mode-inherit': field = 'hls_mode'; value = None
@@ -466,7 +498,7 @@ async def bulk(req: BulkAction):
     with connect() as c:
         cur = c.execute(f'UPDATE channels SET {field}=? WHERE id IN ({ph})', [value, *req.ids])
         if field == 'hls_mode':
-            legacy_enabled = 1 if value in {'compat', 'fixed'} else 0
+            legacy_enabled = 1 if value in {'compat', 'fixed', 'protected'} else 0
             c.execute(f'UPDATE channels SET hls_proxy_enabled=? WHERE id IN ({ph})', [legacy_enabled, *req.ids])
     await _regenerate_after_edit(); return {'updated': cur.rowcount}
 
@@ -674,6 +706,8 @@ async def hls_proxy(cid: int, request: Request):
     height = effective_hls_height(row['hls_max_height'], row['source_hls_max_height'], int(get_setting('hls_proxy_default_height', '720')))
     cache_seconds = int(get_setting('hls_proxy_cache_seconds', '15'))
     local_base = str(request.base_url).rstrip('/')
+    if mode == 'protected':
+        _sync_protected_runtime()
 
     if mode == 'direct':
         record_bypass(cid)
@@ -703,13 +737,13 @@ async def hls_proxy(cid: int, request: Request):
         master, selected = await resolve_selected()
         if selected is None:
             if master.manifest.startswith('#EXTM3U'):
-                body = rewrite_media_playlist(master.manifest, master.final_url, cid, local_base, True, 'media')
+                body = rewrite_media_playlist(master.manifest, master.final_url, cid, local_base, True, 'media', relay_all=(mode == 'protected'))
                 return _hls_response(body, mode, height)
             record_bypass(cid)
             return RedirectResponse(master.final_url, status_code=307)
 
         if selected.attrs.get('AUDIO'):
-            body = build_locked_master(master.manifest, master.final_url, selected, cid, local_base)
+            body = build_locked_master(master.manifest, master.final_url, selected, cid, local_base, mode)
         else:
             try:
                 media, media_url = await fetch_manifest(selected.absolute_uri)
@@ -722,9 +756,9 @@ async def hls_proxy(cid: int, request: Request):
                     return RedirectResponse(master.final_url, status_code=307)
                 media, media_url = await fetch_manifest(selected.absolute_uri)
             if not media.startswith('#EXTM3U'):
-                body = build_locked_master(master.manifest, master.final_url, selected, cid, local_base)
+                body = build_locked_master(master.manifest, master.final_url, selected, cid, local_base, mode)
             else:
-                body = rewrite_media_playlist(media, media_url, cid, local_base, True, 'media')
+                body = rewrite_media_playlist(media, media_url, cid, local_base, True, 'media', relay_all=(mode == 'protected'))
         return _hls_response(body, mode, height)
     except Exception as exc:
         record_failure(cid, str(exc))
@@ -745,10 +779,10 @@ async def hls_child_playlist(cid: int, token: str, request: Request):
         from .hls_proxy import parse_master
         variants = parse_master(body, final_url)
         if variants:
-            rewritten = build_compat_master(body, final_url, cid, local_base)
+            rewritten = build_compat_master(body, final_url, cid, local_base, entry.mode)
         else:
-            rewritten = rewrite_media_playlist(body, final_url, cid, local_base, True, entry.kind)
-        return _hls_response(rewritten, 'compat')
+            rewritten = rewrite_media_playlist(body, final_url, cid, local_base, True, entry.kind, relay_all=(entry.mode == 'protected'))
+        return _hls_response(rewritten, entry.mode)
     except HTTPException:
         raise
     except Exception as exc:
@@ -763,6 +797,20 @@ async def hls_segment_relay(cid: int, token: str, suffix: str, request: Request)
         raise HTTPException(410, 'HLS segment alias expired')
     if entry.suffix.lower() != f'.{suffix.lower()}':
         raise HTTPException(404, 'HLS segment alias extension mismatch')
+
+    if entry.protected:
+        cfg = _sync_protected_runtime()
+        try:
+            result = await acquire_protected_segment(cid, token, entry)
+        except Exception as exc:
+            record_failure(cid, f'Protected atomic segment acquisition failed: {exc}')
+            status = 410 if cfg.get('skip_failed', True) else 504
+            raise HTTPException(status, f'Protected HLS segment could not be acquired within its bounded deadline: {exc}')
+        return FileResponse(
+            result.path,
+            media_type=result.content_type or 'application/octet-stream',
+            headers=protected_segment_headers(result),
+        )
 
     try:
         relay = await prepare_segment_relay(cid, entry)

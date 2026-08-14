@@ -1,7 +1,7 @@
 services:
   iptv-merge-manager:
     build: .
-    image: iptv-merge-manager:0.3.3
+    image: iptv-merge-manager:0.3.4
     container_name: iptv-merge-manager
     restart: unless-stopped
     ports:

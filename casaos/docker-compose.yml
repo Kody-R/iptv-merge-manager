@@ -2,7 +2,7 @@ name: iptv-merge-manager
 
 services:
   iptv-merge-manager:
-    image: ghcr.io/YOUR_GITHUB_USERNAME/iptv-merge-manager:0.3.3
+    image: ghcr.io/kody-r/iptv-merge-manager:0.3.4
     container_name: iptv-merge-manager
     restart: unless-stopped
     ports:
@@ -28,20 +28,20 @@ x-casaos:
   index: /
   port_map: "8080"
   scheme: http
-  icon: https://raw.githubusercontent.com/YOUR_GITHUB_USERNAME/iptv-merge-manager/main/casaos/icon.svg
+  icon: https://raw.githubusercontent.com/kody-r/iptv-merge-manager/main/casaos/icon.svg
   title:
     en_US: IPTV Merge Manager
   tagline:
     en_US: Curate multiple IPTV playlists and XMLTV guides into one lineup.
   description:
     en_US: Merge multiple M3U/M3U8 sources and optional XMLTV guides, select individual channels, sort the master lineup, assign channel numbers, and publish a single M3U and XMLTV feed for Jellyfin or other IPTV clients.
-  author: YOUR_GITHUB_USERNAME
+  author: kody-r
   developer: IPTV Merge Manager
   category: Media
   architectures:
     - amd64
     - arm64
-  version: "0.3.3"
+  version: "0.3.4"
   update_at: "2026-08-14"
   release_notes:
-    en_US: v0.3.3 adds guarded selective relaying for extensionless HLS compatibility segments, hard upstream deadlines, bounded retries, same-sequence URL recovery, stale-segment aborts, and downstream-disconnect cancellation while leaving ordinary HLS media traffic direct.
+    en_US: "v0.3.4 adds Protected Playback: fixed-rendition HLS with disk-backed atomic segment acquisition, bounded retries, prefetching, cache reuse, timeout/skip recovery, and one-time migration of existing Fixed channels to Protected."

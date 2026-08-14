@@ -3,12 +3,12 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>IPTV Merge Manager v0.3.3</title>
+  <title>IPTV Merge Manager v0.3.4</title>
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
 <header class="topbar">
-  <div><h1>IPTV Merge Manager</h1><p>v0.3.3 · guarded HLS segment resilience</p></div>
+  <div><h1>IPTV Merge Manager</h1><p>v0.3.4 · protected atomic HLS playback</p></div>
   <div class="top-actions"><span id="refreshState" class="muted"></span><button id="refreshAllBtn" class="primary">Refresh All</button></div>
 </header>
 <main class="page">
@@ -30,18 +30,29 @@
 </section>
 
 <section class="panel hls-panel">
-  <div class="panel-heading"><div><h2>HLS Compatibility & Variant Lock</h2><p>Normal media segments remain direct. Only synthetic compatibility segments use a guarded, timeout-bounded relay to prevent commercial-break stalls from hanging FFmpeg.</p></div></div>
+  <div class="panel-heading"><div><h2>HLS Playback Protection</h2><p>Protected mode downloads each media segment completely to the disk cache before Jellyfin can read it, preventing a stalled commercial/ad segment from trapping FFmpeg on a half-open response.</p></div></div>
   <form id="hlsSettingsForm" class="hls-settings hls-settings-v032">
     <label class="toggle-label"><input id="hlsProxyGlobal" type="checkbox"> Enable HLS compatibility service</label>
-    <label>Global default mode<select id="hlsDefaultMode"><option value="direct">Direct</option><option value="compat">Playlist Compatibility</option><option value="fixed">Fixed Variant + Compatibility</option></select></label>
+    <label>Global default mode<select id="hlsDefaultMode"><option value="direct">Direct</option><option value="compat">Playlist Compatibility</option><option value="fixed">Fixed Variant + Compatibility</option><option value="protected">Protected Playback (recommended)</option></select></label>
     <label>Default maximum quality<select id="hlsDefaultHeight"><option value="0">Highest available</option><option value="1080">1080p</option><option value="720">720p</option><option value="540">540p</option><option value="360">360p</option></select></label>
     <label>Master cache (seconds)<input id="hlsCacheSeconds" type="number" min="1" max="300" value="15"></label>
+    <label>Protected prefetch segments<input id="hlsProtectedPrefetch" type="number" min="0" max="8" value="2"></label>
+    <label>Protected segment deadline (seconds)<input id="hlsProtectedTimeout" type="number" min="5" max="60" step="1" value="15"></label>
+    <label>Protected attempts<input id="hlsProtectedRetries" type="number" min="1" max="4" value="2"></label>
+    <label>Protected disk cache (MB)<input id="hlsProtectedCacheLimit" type="number" min="64" max="4096" value="512"></label>
+    <label>Cache retention (seconds)<input id="hlsProtectedRetention" type="number" min="30" max="3600" value="180"></label>
+    <label class="toggle-label"><input id="hlsProtectedSkip" type="checkbox" checked> Skip/reload failed protected segments instead of waiting</label>
     <button class="primary" type="submit">Save HLS Settings</button>
   </form>
   <div class="resource-grid hls-stats">
     <div><span>Proxy Requests</span><strong id="hlsRequests">0</strong></div>
     <div><span>Master Resolves</span><strong id="hlsResolves">0</strong></div>
     <div><span>Cache Hits</span><strong id="hlsCacheHits">0</strong></div>
+    <div><span>Protected Downloads</span><strong id="hlsProtectedDownloads">0</strong></div>
+    <div><span>Protected Cache Hits</span><strong id="hlsProtectedHits">0</strong></div>
+    <div><span>Protected Prefetches</span><strong id="hlsProtectedPrefetches">0</strong></div>
+    <div><span>Protected Timeouts</span><strong id="hlsProtectedTimeouts">0</strong></div>
+    <div><span>Protected Skips</span><strong id="hlsProtectedSkips">0</strong></div>
     <div><span>Guarded Relays</span><strong id="hlsSegmentRelays">0</strong></div>
     <div><span>Relay Retries</span><strong id="hlsSegmentRetries">0</strong></div>
     <div><span>Relay Timeouts</span><strong id="hlsSegmentTimeouts">0</strong></div>
@@ -55,7 +66,7 @@
     <div><span>Failures</span><strong id="hlsFailures">0</strong></div>
   </div>
   <p id="hlsRelayPolicy" class="muted hls-note"></p>
-  <p class="muted hls-note"><b>Direct</b> leaves the stream alone. <b>Playlist Compatibility</b> preserves adaptive choices but rewrites child playlists and extensionless media URIs. <b>Fixed Variant + Compatibility</b> also locks adaptive masters to one rendition. Existing v0.3.1 locked channels migrate to this mode. In v0.3.3, extensionless compatibility aliases are selectively relayed with hard connect/first-byte/read-idle/overall deadlines; ordinary HLS segment traffic remains direct.</p>
+  <p class="muted hls-note"><b>Direct</b> leaves the stream alone. <b>Compatibility</b> fixes playlist/extensionless URI issues. <b>Fixed</b> also locks adaptive masters to one rendition while normal segments remain direct. <b>Protected</b> locks the rendition and routes every media segment through an atomic disk-backed cache: a segment is published only after the upstream request has fully completed. Failed segments get a bounded reload/skip response instead of an indefinitely open connection. Existing v0.3.3 Fixed selections migrate once to Protected during upgrade.</p>
 </section>
 
 <section class="panel">
@@ -73,7 +84,7 @@
 <section class="panel">
   <div class="panel-heading"><div><h2>Channel Browser</h2><p>Check rows, run bulk actions, or edit individual channel metadata and HLS behavior.</p></div></div>
   <div class="toolbar"><input id="searchInput" type="search" placeholder="Search channel, TVG-ID, source"><select id="sourceFilter"><option value="">All sources</option></select><select id="groupFilter"><option value="">All groups</option></select><button id="checkVisibleBtn">Check Visible</button><button id="clearChecksBtn">Clear Checks</button></div>
-  <div class="bulkbar"><select id="bulkAction"><option value="enable">Add checked to lineup</option><option value="disable">Remove checked from lineup</option><option value="group">Assign custom group</option><option value="clear-numbers">Clear channel numbers</option><option value="hls-mode-inherit">HLS mode: inherit source/global</option><option value="hls-mode-direct">HLS mode: Direct</option><option value="hls-mode-compat">HLS mode: Playlist Compatibility</option><option value="hls-mode-fixed">HLS mode: Fixed Variant + Compatibility</option><option value="hls-default">HLS quality: inherit</option><option value="hls-720">HLS quality: 720p</option><option value="hls-540">HLS quality: 540p</option><option value="hls-360">HLS quality: 360p</option></select><input id="bulkValue" placeholder="Group name (when needed)"><button id="applyBulkBtn" class="primary">Apply to Checked</button><span id="checkedCount" class="muted">0 checked</span></div>
+  <div class="bulkbar"><select id="bulkAction"><option value="enable">Add checked to lineup</option><option value="disable">Remove checked from lineup</option><option value="group">Assign custom group</option><option value="clear-numbers">Clear channel numbers</option><option value="hls-mode-inherit">HLS mode: inherit source/global</option><option value="hls-mode-direct">HLS mode: Direct</option><option value="hls-mode-compat">HLS mode: Playlist Compatibility</option><option value="hls-mode-fixed">HLS mode: Fixed Variant + Compatibility</option><option value="hls-mode-protected">HLS mode: Protected Playback</option><option value="hls-default">HLS quality: inherit</option><option value="hls-720">HLS quality: 720p</option><option value="hls-540">HLS quality: 540p</option><option value="hls-360">HLS quality: 360p</option></select><input id="bulkValue" placeholder="Group name (when needed)"><button id="applyBulkBtn" class="primary">Apply to Checked</button><span id="checkedCount" class="muted">0 checked</span></div>
   <div class="pager"><button id="prevChannelPage">← Previous</button><span id="channelPageInfo" class="muted">Page 1</span><button id="nextChannelPage">Next →</button></div>
   <div class="table-wrap browser-wrap"><table><thead><tr><th>✓</th><th>Use</th><th>Channel</th><th>Source</th><th>Group</th><th>TVG-ID</th><th>EPG</th><th>HLS</th><th></th></tr></thead><tbody id="channelsBody"></tbody></table></div>
 </section>
@@ -90,10 +101,10 @@
 <div id="editor" class="modal hidden"><div class="modal-card"><div class="modal-head"><h2>Edit Channel</h2><button id="closeEditor">×</button></div><form id="editForm">
   <input id="editId" type="hidden"><label>Original Name<input id="originalName" disabled></label><label>Display Name<input id="editName" placeholder="Use provider value"></label><label>Channel Number<input id="editNumber" type="number" min="0"></label><label>Custom Group<input id="editGroup" placeholder="Use provider group"></label><label>TVG-ID Override<div class="inline"><input id="editTvg"><button id="suggestEpgBtn" type="button">Suggest EPG</button></div></label><label>Logo URL<input id="editLogo" type="url" placeholder="Use provider logo"></label>
   <div class="hls-editor">
-    <label>HLS mode<select id="editHlsMode"><option value="">Inherit source/global</option><option value="direct">Direct</option><option value="compat">Playlist Compatibility</option><option value="fixed">Fixed Variant + Compatibility</option></select></label>
+    <label>HLS mode<select id="editHlsMode"><option value="">Inherit source/global</option><option value="direct">Direct</option><option value="compat">Playlist Compatibility</option><option value="fixed">Fixed Variant + Compatibility</option><option value="protected">Protected Playback (recommended)</option></select></label>
     <label>Maximum HLS quality<select id="editHlsHeight"><option value="">Inherit source/global</option><option value="0">Highest available</option><option value="1080">1080p</option><option value="720">720p</option><option value="540">540p</option><option value="360">360p</option></select></label>
     <div class="hls-button-row"><button id="analyzeHlsBtn" type="button">Analyze HLS</button><button id="hlsDiagnosticsBtn" type="button">Diagnostics</button></div>
-    <div id="hlsAnalysis" class="hls-analysis muted">Use Fixed Variant + Compatibility for adaptive feeds that expose multiple FFmpeg programs or extensionless segments.</div>
+    <div id="hlsAnalysis" class="hls-analysis muted">Use Protected Playback for feeds that freeze at commercials, discontinuities, CDN changes, or stalled media segments. Fixed remains available when direct-to-CDN media delivery is preferred.</div>
     <div id="hlsDiagnostics" class="hls-analysis muted hidden"></div>
   </div>
   <div id="epgSuggestions" class="suggestions"></div><div class="modal-actions"><button type="button" id="cancelEditor">Cancel</button><button class="primary" type="submit">Save Changes</button></div>
