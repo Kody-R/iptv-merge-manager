@@ -14,7 +14,7 @@ from urllib.parse import urljoin, urlparse
 
 import httpx
 
-APP_VERSION = '0.3.4'
+APP_VERSION = '0.4.0'
 SEGMENT_CONNECT_TIMEOUT = max(1.0, float(os.getenv('HLS_SEGMENT_CONNECT_TIMEOUT', '4')))
 SEGMENT_FIRST_BYTE_TIMEOUT = max(1.0, float(os.getenv('HLS_SEGMENT_FIRST_BYTE_TIMEOUT', '6')))
 SEGMENT_READ_IDLE_TIMEOUT = max(1.0, float(os.getenv('HLS_SEGMENT_READ_IDLE_TIMEOUT', '10')))

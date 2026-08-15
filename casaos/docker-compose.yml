@@ -2,7 +2,7 @@ name: iptv-merge-manager
 
 services:
   iptv-merge-manager:
-    image: ghcr.io/kody-r/iptv-merge-manager:0.3.4
+    image: ghcr.io/kody-r/iptv-merge-manager:0.4.0
     container_name: iptv-merge-manager
     restart: unless-stopped
     ports:
@@ -32,16 +32,16 @@ x-casaos:
   title:
     en_US: IPTV Merge Manager
   tagline:
-    en_US: Curate multiple IPTV playlists and XMLTV guides into one lineup.
+    en_US: Merge, protect, and stabilize IPTV playlists and XMLTV guides in one lineup.
   description:
-    en_US: Merge multiple M3U/M3U8 sources and optional XMLTV guides, select individual channels, sort the master lineup, assign channel numbers, and publish a single M3U and XMLTV feed for Jellyfin or other IPTV clients.
+    en_US: Merge multiple M3U/M3U8 sources and XMLTV guides, curate the master lineup, protect HLS acquisition, and optionally stabilize troublesome FAST/SSAI channels with on-demand FFmpeg normalization before publishing one M3U/XMLTV feed for Jellyfin.
   author: kody-r
   developer: IPTV Merge Manager
   category: Media
   architectures:
     - amd64
     - arm64
-  version: "0.3.4"
-  update_at: "2026-08-14"
+  version: "0.4.0"
+  update_at: "2026-08-15"
   release_notes:
-    en_US: "v0.3.4 adds Protected Playback: fixed-rendition HLS with disk-backed atomic segment acquisition, bounded retries, prefetching, cache reuse, timeout/skip recovery, and one-time migration of existing Fixed channels to Protected."
+    en_US: "v0.4.0 integrates on-demand FFmpeg stream stabilization with source defaults and per-channel overrides. Stabilized Remux normalizes HLS/MPEG-TS timestamps without -copyts/-re; Full Transcode provides a stronger software fallback. Protected acquisition remains available underneath stabilization."

@@ -48,6 +48,7 @@ def init_db() -> None:
                 last_refresh TEXT,
                 last_error TEXT,
                 channel_count INTEGER NOT NULL DEFAULT 0,
+                stabilizer_mode TEXT NOT NULL DEFAULT 'off',
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
 
@@ -63,6 +64,7 @@ def init_db() -> None:
                 selected INTEGER NOT NULL DEFAULT 0,
                 sort_order INTEGER NOT NULL DEFAULT 0,
                 channel_number INTEGER,
+                stabilizer_mode TEXT,
                 is_active INTEGER NOT NULL DEFAULT 1,
                 first_seen TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 last_seen TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -119,6 +121,7 @@ def init_db() -> None:
             'hls_proxy_enabled': 'INTEGER NOT NULL DEFAULT 0',
             'hls_max_height': 'INTEGER',
             'hls_mode': 'TEXT',
+            'stabilizer_mode': 'TEXT',
         }.items():
             if name not in cols:
                 conn.execute(f'ALTER TABLE channels ADD COLUMN {name} {ddl}')
@@ -127,6 +130,7 @@ def init_db() -> None:
         for name, ddl in {
             'hls_mode': "TEXT NOT NULL DEFAULT 'inherit'",
             'hls_max_height': 'INTEGER',
+            'stabilizer_mode': "TEXT NOT NULL DEFAULT 'off'",
         }.items():
             if name not in source_cols:
                 conn.execute(f'ALTER TABLE sources ADD COLUMN {name} {ddl}')
@@ -152,6 +156,21 @@ def init_db() -> None:
         conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('hls_protected_skip_failed','1')")
         conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('hls_protected_cache_limit_mb','512')")
         conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('hls_protected_cache_retention','180')")
+        conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('stabilizer_enabled','1')")
+        conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('stabilizer_default_mode','off')")
+        conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('stabilizer_idle_timeout','60')")
+        conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('stabilizer_stall_timeout','8')")
+        conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('stabilizer_startup_timeout','15')")
+        conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('stabilizer_ready_segments','2')")
+        conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('stabilizer_hls_time','3')")
+        conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('stabilizer_hls_list_size','12')")
+        conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('stabilizer_hls_delete_threshold','4')")
+        conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('stabilizer_dts_delta_threshold','1.0')")
+        conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('stabilizer_auto_restart','1')")
+        conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('stabilizer_max_workers','12')")
+        conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('stabilizer_x264_preset','veryfast')")
+        conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('stabilizer_x264_crf','20')")
+        conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('stabilizer_audio_bitrate','160k')")
 
         # v0.3.4 is reliability-first. Existing Fixed channels/sources were generally enabled
         # to work around unstable adaptive feeds, so migrate them once to Protected mode.

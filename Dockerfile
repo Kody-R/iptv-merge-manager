@@ -1,6 +1,6 @@
 FROM python:3.12-slim
 
-ARG VERSION=0.3.4
+ARG VERSION=0.4.0
 LABEL org.opencontainers.image.title="IPTV Merge Manager" \
       org.opencontainers.image.description="Curate and merge multiple IPTV M3U/M3U8 playlists and XMLTV guides" \
       org.opencontainers.image.version="${VERSION}" \
@@ -14,14 +14,14 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends tzdata ca-certificates \
+    && apt-get install -y --no-install-recommends tzdata ca-certificates ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app ./app
-RUN mkdir -p /app/data/cache /app/data/uploads /app/output
+RUN mkdir -p /app/data/cache /app/data/cache/stabilized /app/data/logs/stabilizer /app/data/uploads /app/output
 
 EXPOSE 8080
 

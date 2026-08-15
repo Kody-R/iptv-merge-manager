@@ -33,6 +33,9 @@ from .hls_proxy import (
     resolve_playlist_token, resolve_segment_token, rewrite_media_playlist, segment_relay_headers,
     select_variant, stream_segment_relay, VALID_HLS_MODES,
 )
+from .stabilizer import (
+    StabilizerSupervisor, VALID_STABILIZER_MODES, effective_stabilizer_mode, stabilizer_settings,
+)
 
 APP_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = APP_DIR.parent
@@ -45,6 +48,7 @@ REFRESH_HOURS = max(1, int(os.getenv('REFRESH_HOURS', '4')))
 UPLOAD_CHUNK = 256 * 1024
 refresh_lock = asyncio.Lock()
 scheduler = AsyncIOScheduler(timezone=ZoneInfo(TZ_NAME))
+stabilizer_supervisor: StabilizerSupervisor | None = None
 
 PROFILES = {
     'low-memory': {'page_size': 100, 'history_limit': 10, 'label': 'Low Memory'},
@@ -97,7 +101,9 @@ async def refresh_all():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global stabilizer_supervisor
     init_db()
+    stabilizer_supervisor = StabilizerSupervisor()
     # Generate in an isolated process so libxml allocations cannot inflate web-server idle RSS.
     try:
         await worker_async('reindex')
@@ -112,9 +118,12 @@ async def lifespan(app: FastAPI):
     scheduler.start()
     yield
     scheduler.shutdown(wait=False)
+    if stabilizer_supervisor:
+        stabilizer_supervisor.shutdown()
+        stabilizer_supervisor = None
 
 
-app = FastAPI(title='IPTV Merge Manager', version='0.3.4', lifespan=lifespan)
+app = FastAPI(title='IPTV Merge Manager', version='0.4.0', lifespan=lifespan)
 app.mount('/static', StaticFiles(directory=APP_DIR / 'static'), name='static')
 templates = Jinja2Templates(directory=APP_DIR / 'templates')
 
@@ -133,6 +142,7 @@ class ChannelEdit(BaseModel):
     hls_proxy_enabled: bool | None = None  # retained for v0.3.1 API compatibility
     hls_mode: str | None = None
     hls_max_height: int | None = None
+    stabilizer_mode: str | None = None
 
 
 class BulkAction(BaseModel):
@@ -179,6 +189,28 @@ class SourceHlsPatch(BaseModel):
     max_height: int | None = None
 
 
+class SourceStabilizerPatch(BaseModel):
+    mode: str = 'off'
+
+
+class StabilizerSettingsPatch(BaseModel):
+    enabled: bool = True
+    default_mode: str = 'off'
+    idle_timeout_seconds: int = 60
+    stall_timeout_seconds: int = 8
+    startup_timeout_seconds: int = 15
+    ready_segments: int = 2
+    hls_time: int = 3
+    hls_list_size: int = 12
+    hls_delete_threshold: int = 4
+    dts_delta_threshold: float = 1.0
+    auto_restart: bool = True
+    max_workers: int = 12
+    x264_preset: str = 'veryfast'
+    x264_crf: int = 20
+    audio_bitrate: str = '160k'
+
+
 def _sync_protected_runtime() -> dict:
     return configure_protected(
         prefetch_depth=int(get_setting('hls_protected_prefetch', '2')),
@@ -188,6 +220,12 @@ def _sync_protected_runtime() -> dict:
         cache_limit_mb=int(get_setting('hls_protected_cache_limit_mb', '512')),
         retention_seconds=int(get_setting('hls_protected_cache_retention', '180')),
     )
+
+
+def _stabilizer() -> StabilizerSupervisor:
+    if stabilizer_supervisor is None:
+        raise HTTPException(503, 'Stabilizer supervisor is not ready')
+    return stabilizer_supervisor
 
 
 def _read_proc_kb(field: str) -> int | None:
@@ -245,7 +283,7 @@ def index(request: Request):
 
 @app.get('/health')
 def health():
-    return {'status': 'ok', 'version': '0.3.4'}
+    return {'status': 'ok', 'version': '0.4.0'}
 
 
 @app.get('/api/status')
@@ -270,8 +308,21 @@ def status():
         ).fetchall())
         unnumbered = c.execute('SELECT COUNT(*) FROM channels WHERE selected=1 AND is_active=1 AND channel_number IS NULL').fetchone()[0]
         last_peak = c.execute('SELECT peak_rss_kb FROM refresh_log WHERE peak_rss_kb IS NOT NULL ORDER BY id DESC LIMIT 1').fetchone()
+        stab_rows = c.execute(
+            '''SELECT c.stabilizer_mode,s.stabilizer_mode source_stabilizer_mode
+               FROM channels c JOIN sources s ON s.id=c.source_id
+               WHERE c.is_active=1 AND s.enabled=1'''
+        ).fetchall()
+    stab_cfg = stabilizer_settings()
+    configured_stabilized = sum(
+        1 for r in stab_rows
+        if effective_stabilizer_mode(r['stabilizer_mode'], r['source_stabilizer_mode'], stab_cfg['default_mode']) != 'off'
+    )
+    stab_runtime = stabilizer_supervisor.summary() if stabilizer_supervisor else {
+        'active_workers': 0, 'known_workers': 0, 'restarts': 0, 'stalls': 0, 'errors': 0, 'workers': []
+    }
     return {
-        'version': '0.3.4', 'timezone': TZ_NAME, 'refresh_hours': REFRESH_HOURS,
+        'version': '0.4.0', 'timezone': TZ_NAME, 'refresh_hours': REFRESH_HOURS,
         'source_count': source_count, 'active_channels': active, 'selected_channels': selected,
         'with_epg': with_epg, 'missing_epg': missing, 'group_count': groups, 'unnumbered': unnumbered,
         'logs': logs, 'resource_profile': profile, 'default_page_size': cfg['page_size'],
@@ -282,6 +333,11 @@ def status():
             'cache_seconds': int(get_setting('hls_proxy_cache_seconds', '15')),
             'protected': _sync_protected_runtime(),
             **proxy_stats(),
+        },
+        'stabilizer': {
+            **stab_cfg,
+            'configured_channels': configured_stabilized,
+            **stab_runtime,
         },
         'memory': {
             'web_rss_kb': _read_proc_kb('VmRSS'),
@@ -332,6 +388,40 @@ async def set_hls_proxy_settings(req: HlsProxySettingsPatch):
     return {'ok': True, 'enabled': req.enabled, 'default_mode': mode, 'default_max_height': height, 'cache_seconds': cache_seconds, 'protected': protected}
 
 
+@app.post('/api/settings/stabilizer')
+async def set_stabilizer_settings(req: StabilizerSettingsPatch):
+    mode = (req.default_mode or 'off').strip().lower()
+    if mode not in VALID_STABILIZER_MODES:
+        raise HTTPException(400, 'Unknown stabilizer mode')
+    preset = (req.x264_preset or 'veryfast').strip().lower()
+    if preset not in {'ultrafast','superfast','veryfast','faster','fast','medium','slow'}:
+        raise HTTPException(400, 'Unsupported x264 preset')
+    audio_bitrate = (req.audio_bitrate or '160k').strip().lower()
+    if not audio_bitrate.endswith('k') or not audio_bitrate[:-1].isdigit():
+        raise HTTPException(400, 'Audio bitrate must look like 128k or 160k')
+    values = {
+        'stabilizer_enabled': '1' if req.enabled else '0',
+        'stabilizer_default_mode': mode,
+        'stabilizer_idle_timeout': str(max(15, min(3600, int(req.idle_timeout_seconds)))),
+        'stabilizer_stall_timeout': str(max(4, min(300, int(req.stall_timeout_seconds)))),
+        'stabilizer_startup_timeout': str(max(5, min(120, int(req.startup_timeout_seconds)))),
+        'stabilizer_ready_segments': str(max(1, min(6, int(req.ready_segments)))),
+        'stabilizer_hls_time': str(max(1, min(10, int(req.hls_time)))),
+        'stabilizer_hls_list_size': str(max(4, min(60, int(req.hls_list_size)))),
+        'stabilizer_hls_delete_threshold': str(max(1, min(20, int(req.hls_delete_threshold)))),
+        'stabilizer_dts_delta_threshold': str(max(0.1, min(30.0, float(req.dts_delta_threshold)))),
+        'stabilizer_auto_restart': '1' if req.auto_restart else '0',
+        'stabilizer_max_workers': str(max(1, min(64, int(req.max_workers)))),
+        'stabilizer_x264_preset': preset,
+        'stabilizer_x264_crf': str(max(14, min(32, int(req.x264_crf)))),
+        'stabilizer_audio_bitrate': audio_bitrate,
+    }
+    for key, value in values.items():
+        set_setting(key, value)
+    await regenerate_outputs()
+    return {'ok': True, **stabilizer_settings()}
+
+
 @app.get('/api/sources')
 def sources():
     with connect() as c:
@@ -350,6 +440,19 @@ async def set_source_hls(sid: int, req: SourceHlsPatch):
         c.execute('UPDATE sources SET hls_mode=?,hls_max_height=? WHERE id=?', (mode, height, sid))
     await regenerate_outputs()
     return {'ok': True, 'mode': mode, 'max_height': height}
+
+
+@app.patch('/api/sources/{sid}/stabilizer')
+async def set_source_stabilizer(sid: int, req: SourceStabilizerPatch):
+    mode = (req.mode or 'off').strip().lower()
+    if mode not in {'inherit', *VALID_STABILIZER_MODES}:
+        raise HTTPException(400, 'Unknown source stabilizer mode')
+    with connect() as c:
+        if not c.execute('SELECT 1 FROM sources WHERE id=?', (sid,)).fetchone():
+            raise HTTPException(404, 'Source not found')
+        c.execute('UPDATE sources SET stabilizer_mode=? WHERE id=?', (mode, sid))
+    await regenerate_outputs()
+    return {'ok': True, 'mode': mode}
 
 
 @app.post('/api/sources')
@@ -426,6 +529,7 @@ def channels(
     with connect() as c:
         total = c.execute('SELECT COUNT(*) ' + base, params).fetchone()[0]
         sql = '''SELECT c.*,s.name source_name,s.hls_mode source_hls_mode,s.hls_max_height source_hls_max_height,
+                 s.stabilizer_mode source_stabilizer_mode,
                  COALESCE(NULLIF(c.custom_name,''),c.name) display_name,
                  COALESCE(NULLIF(c.custom_group,''),c.group_title) display_group,
                  COALESCE(NULLIF(c.custom_tvg_id,''),c.tvg_id) display_tvg_id,
@@ -454,7 +558,7 @@ async def patch_channel(cid: int, patch: ChannelPatch):
 async def edit_channel(cid: int, e: ChannelEdit):
     vals = [(x.strip() if isinstance(x, str) else x) or None for x in (e.custom_name, e.custom_group, e.custom_tvg_id, e.custom_logo)]
     with connect() as c:
-        old = c.execute('SELECT hls_mode,hls_proxy_enabled,hls_max_height FROM channels WHERE id=?', (cid,)).fetchone()
+        old = c.execute('SELECT hls_mode,hls_proxy_enabled,hls_max_height,stabilizer_mode FROM channels WHERE id=?', (cid,)).fetchone()
         if not old:
             raise HTTPException(404, 'Channel not found')
         mode = old['hls_mode']
@@ -468,9 +572,14 @@ async def edit_channel(cid: int, e: ChannelEdit):
         max_height = old['hls_max_height']
         if 'hls_max_height' in e.model_fields_set:
             max_height = e.hls_max_height if e.hls_max_height is not None and e.hls_max_height >= 0 else None
+        stabilizer_mode = old['stabilizer_mode']
+        if 'stabilizer_mode' in e.model_fields_set:
+            stabilizer_mode = (e.stabilizer_mode or '').strip().lower() or None
+        if stabilizer_mode not in ({None} | VALID_STABILIZER_MODES):
+            raise HTTPException(400, 'Unknown channel stabilizer mode')
         c.execute(
-            'UPDATE channels SET custom_name=?,custom_group=?,custom_tvg_id=?,custom_logo=?,channel_number=?,hls_proxy_enabled=?,hls_mode=?,hls_max_height=? WHERE id=?',
-            (*vals, e.channel_number, proxy_enabled, mode, max_height, cid),
+            'UPDATE channels SET custom_name=?,custom_group=?,custom_tvg_id=?,custom_logo=?,channel_number=?,hls_proxy_enabled=?,hls_mode=?,hls_max_height=?,stabilizer_mode=? WHERE id=?',
+            (*vals, e.channel_number, proxy_enabled, mode, max_height, stabilizer_mode, cid),
         )
     await _regenerate_after_edit(); return {'ok': True}
 
@@ -494,6 +603,10 @@ async def bulk(req: BulkAction):
     elif req.action == 'hls-540': field = 'hls_max_height'; value = 540
     elif req.action == 'hls-360': field = 'hls_max_height'; value = 360
     elif req.action == 'hls-default': field = 'hls_max_height'; value = None
+    elif req.action == 'stabilizer-inherit': field = 'stabilizer_mode'; value = None
+    elif req.action == 'stabilizer-off': field = 'stabilizer_mode'; value = 'off'
+    elif req.action == 'stabilizer-remux': field = 'stabilizer_mode'; value = 'remux'
+    elif req.action == 'stabilizer-transcode': field = 'stabilizer_mode'; value = 'transcode'
     else: raise HTTPException(400, 'Unknown bulk action')
     with connect() as c:
         cur = c.execute(f'UPDATE channels SET {field}=? WHERE id IN ({ph})', [value, *req.ids])
@@ -621,6 +734,68 @@ async def m3u(request: Request):
         media_type='audio/x-mpegurl',
         headers={'Content-Disposition': 'inline; filename=master.m3u', 'Cache-Control': 'no-cache'},
     )
+
+
+@app.get('/api/channels/{cid}/stabilizer-diagnostics')
+def stabilizer_diagnostics(cid: int):
+    with connect() as c:
+        if not c.execute('SELECT 1 FROM channels WHERE id=?', (cid,)).fetchone():
+            raise HTTPException(404, 'Channel not found')
+    return {'settings': stabilizer_settings(), 'runtime': _stabilizer().status_for(cid)}
+
+
+@app.post('/api/channels/{cid}/stabilizer/restart')
+def restart_stabilizer(cid: int):
+    try:
+        rt = _stabilizer().restart(cid, reason='manual')
+    except KeyError:
+        raise HTTPException(404, 'Channel not found')
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc))
+    return {'ok': True, 'runtime': rt.status()}
+
+
+@app.post('/api/channels/{cid}/stabilizer/stop')
+def stop_stabilizer(cid: int):
+    _stabilizer().stop(cid, reason='manual')
+    return {'ok': True}
+
+
+@app.get('/stabilized/channel/{cid}/index.m3u8')
+async def stabilized_playlist(cid: int):
+    try:
+        path = await _stabilizer().ensure_ready(cid)
+    except KeyError:
+        raise HTTPException(404, 'Channel not found')
+    except TimeoutError as exc:
+        raise HTTPException(503, str(exc), headers={'Retry-After': '2'})
+    except RuntimeError as exc:
+        raise HTTPException(502, str(exc))
+    supervisor = _stabilizer()
+    supervisor.touch(cid)
+    runtime = supervisor.status_for(cid)
+    return Response(
+        path.read_text(encoding='utf-8', errors='replace'),
+        media_type='application/vnd.apple.mpegurl',
+        headers={
+            'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0',
+            'Pragma': 'no-cache',
+            'X-IPTVMM-Stabilizer': str(runtime.get('effective_mode') or runtime.get('mode') or 'enabled'),
+            'X-IPTVMM-Acquisition': str(runtime.get('acquisition_mode') or 'direct'),
+        },
+    )
+
+
+@app.get('/stabilized/channel/{cid}/{filename}')
+def stabilized_segment(cid: int, filename: str):
+    if '/' in filename or '\\' in filename or '..' in filename or not filename.endswith(('.ts', '.m4s', '.mp4', '.aac')):
+        raise HTTPException(400, 'Invalid stabilized segment filename')
+    supervisor = _stabilizer()
+    path = supervisor.output_dir(cid) / filename
+    if not path.exists() or not path.is_file():
+        raise HTTPException(404, 'Stabilized segment not found')
+    supervisor.touch(cid)
+    return FileResponse(path, media_type='video/mp2t', headers={'Cache-Control': 'private, max-age=20'})
 
 
 @app.get('/api/channels/{cid}/hls-analyze')

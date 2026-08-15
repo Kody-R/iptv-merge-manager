@@ -78,17 +78,17 @@ Generated feeds:
 
 ## Updating later
 
-For the v0.3.4 release (and the same pattern for later releases):
+For the v0.4.0 release (and the same pattern for later releases):
 
 1. Update the source and version.
 2. Commit and push.
 3. Tag the release:
 
 ```bash
-git tag v0.3.4
-git push origin v0.3.4
+git tag v0.4.0
+git push origin v0.4.0
 ```
 
-4. Change the CasaOS image tag from your currently installed version to `0.3.4` and update/recreate the app.
+4. Change the CasaOS image tag from your currently installed version to `0.4.0` and update/recreate the app.
 
 Pinning CasaOS to a versioned image tag is preferred over relying on `latest`, because it makes upgrades explicit and rollbacks straightforward.

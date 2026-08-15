@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.4.0
+
+- Integrated the IPTV Stream Stabilizer directly into IPTV Merge Manager.
+- Added source-level stabilization defaults: Off, Remux, Full Transcode, or Inherit Global.
+- Added per-channel stabilization overrides and bulk actions.
+- Added Stabilized Remux using FFmpeg stream-copy with no `-copyts` and no `-re`, plus configurable `-dts_delta_threshold`.
+- Added Full Software Transcode fallback using libx264/AAC, `+genpts`, and asynchronous audio resampling.
+- Added on-demand worker startup, shared per-channel output, idle shutdown, worker cap, and output-stall watchdog/restart.
+- Added `/stabilized/channel/{id}/index.m3u8` playback endpoints and per-channel segment serving.
+- Added runtime diagnostics and global stabilizer statistics/settings in the web UI.
+- Stabilization can be layered over Protected acquisition; the generated master M3U automatically chooses stabilized URLs.
+- Added FFmpeg to the Docker image.
+- Existing v0.3.4 databases migrate additively; all existing sources default to stabilization Off, so upgrades do not change playback until explicitly enabled.
+
 ## v0.3.4
 
 Protected Playback reliability release:

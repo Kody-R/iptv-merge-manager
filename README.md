@@ -1,4 +1,4 @@
-# IPTV Merge Manager v0.3.4
+# IPTV Merge Manager v0.4.0
 
 A self-hosted Docker application that combines multiple IPTV M3U/M3U8 channel lists and optional XMLTV guides into one curated master lineup.
 
@@ -23,6 +23,38 @@ A self-hosted Docker application that combines multiple IPTV M3U/M3U8 channel li
 - Generated `/output/master.xml`
 - XMLTV output filtered to selected TVG IDs
 - Refresh history in the web UI
+- Integrated source-level and per-channel stream stabilization
+- On-demand FFmpeg timestamp-normalization workers with watchdog recovery
+
+
+## v0.4.0 Integrated Stream Stabilization
+
+v0.4.0 folds the experimental stream stabilizer directly into IPTV Merge Manager. A source can now opt all of its channels into stabilization, while individual channels can inherit or override that source policy. Jellyfin still consumes the single normal `master.m3u`; IPTVMM chooses the correct playback path per channel.
+
+The recommended path for troublesome FAST/SSAI feeds is:
+
+```text
+provider -> Protected acquisition -> Stabilized Remux -> Jellyfin
+```
+
+**Stabilized Remux** launches FFmpeg only while a channel is being watched. It copies the original video/audio codecs, deliberately omits `-copyts` and `-re`, and applies `-dts_delta_threshold` so FFmpeg can normalize HLS/MPEG-TS timestamp discontinuities before Jellyfin sees them. **Full Software Transcode** is an optional stronger fallback using libx264/AAC plus generated timestamps.
+
+Highlights:
+
+- Source-level stabilization: Off / Remux / Full Transcode / Inherit Global.
+- Per-channel stabilization override with bulk actions.
+- Stabilization is independent from acquisition mode, so Protected + Stabilized Remux can be combined.
+- On-demand FFmpeg workers; no worker exists for an unwatched channel.
+- Shared per-channel output for multiple viewers.
+- Automatic idle shutdown (60 seconds default).
+- Output-stall watchdog (8 seconds default) with automatic restart.
+- Configurable `-dts_delta_threshold` (1.0 second default).
+- Rolling local MPEG-TS HLS output with atomic temporary-file publication.
+- Global worker cap (12 default).
+- Per-channel runtime diagnostics including PID, command, starts, restarts, stalls, output age, and last error.
+- Stabilizer logs under `/app/data/logs/stabilizer`.
+- FFmpeg is included in the Docker image; no GPU mapping is required for Remux or the default software-transcode fallback.
+- Upgrades from a source-built v0.3.x container must rebuild the image (`docker compose up -d --build`) so FFmpeg is installed.
 
 
 ## v0.3.4 Protected Playback
