@@ -1,147 +1,15 @@
-<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>IPTV Merge Manager v0.4.0</title>
-  <link rel="stylesheet" href="/static/style.css">
-</head>
-<body>
-<header class="topbar">
-  <div><h1>IPTV Merge Manager</h1><p>v0.4.0 · protected acquisition + integrated stream stabilization</p></div>
-  <div class="top-actions"><span id="refreshState" class="muted"></span><button id="refreshAllBtn" class="primary">Refresh All</button></div>
-</header>
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>IPTV Merge Manager v0.5.0</title><link rel="stylesheet" href="/static/style.css"></head><body>
+<header class="topbar"><div><h1>IPTV Merge Manager</h1><p>v0.5.0 Core · playlist + guide merging</p></div><div class="top-actions"><span id="refreshState" class="muted"></span><button id="refreshAllBtn" class="primary">Refresh All</button></div></header>
 <main class="page">
-<section class="stats">
-  <div class="stat"><span>Sources</span><strong id="statSources">0</strong></div>
-  <div class="stat"><span>Discovered</span><strong id="statActive">0</strong></div>
-  <div class="stat"><span>In lineup</span><strong id="statSelected">0</strong></div>
-  <div class="stat"><span>With EPG</span><strong id="statEpg">0</strong></div>
-  <div class="stat"><span>Missing EPG</span><strong id="statMissing">0</strong></div>
-  <div class="stat"><span>Groups</span><strong id="statGroups">0</strong></div>
-  <div class="stat"><span>Unnumbered</span><strong id="statUnnumbered">0</strong></div>
-  <div class="stat"><span>Outputs</span><div><a href="/output/master.m3u">M3U</a> · <a href="/output/master.xml">XMLTV</a> · <a href="/output/master.xml.gz">GZ</a></div></div>
-</section>
+<section class="stats"><div class="stat"><span>Sources</span><strong id="statSources">0</strong></div><div class="stat"><span>Discovered</span><strong id="statActive">0</strong></div><div class="stat"><span>In lineup</span><strong id="statSelected">0</strong></div><div class="stat"><span>With EPG</span><strong id="statEpg">0</strong></div><div class="stat"><span>Missing EPG</span><strong id="statMissing">0</strong></div><div class="stat"><span>Groups</span><strong id="statGroups">0</strong></div><div class="stat"><span>Unnumbered</span><strong id="statUnnumbered">0</strong></div><div class="stat"><span>Outputs</span><div><a href="/output/master.m3u">M3U</a> · <a href="/output/master.xml">XMLTV</a> · <a href="/output/master.xml.gz">GZ</a></div></div></section>
 
-<section class="panel resource-panel">
-  <div class="panel-heading"><div><h2>Resource Monitor</h2><p>Large IPTV/EPG jobs remain disk-backed and isolated in short-lived workers.</p></div><label class="profile-label">Resource Profile<select id="resourceProfile"><option value="low-memory">Low Memory</option><option value="balanced">Balanced</option><option value="performance">Performance</option></select></label></div>
-  <div class="resource-grid"><div><span>Web RSS</span><strong id="memWeb">—</strong></div><div><span>Container RAM</span><strong id="memContainer">—</strong></div><div><span>RAM Limit</span><strong id="memLimit">—</strong></div><div><span>Last Refresh Peak</span><strong id="memRefresh">—</strong></div><div><span>Disk Cache</span><strong id="memCache">—</strong></div><div><span>Output Size</span><strong id="memOutput">—</strong></div></div>
-  <p class="muted hls-note">Low Memory uses 100-row browser pages and keeps only 10 refresh-history records. Refreshes remain sequential.</p>
-</section>
-
-<section class="panel hls-panel">
-  <div class="panel-heading"><div><h2>HLS Playback Protection</h2><p>Protected mode downloads each media segment completely to the disk cache before Jellyfin can read it, preventing a stalled commercial/ad segment from trapping FFmpeg on a half-open response.</p></div></div>
-  <form id="hlsSettingsForm" class="hls-settings hls-settings-v032">
-    <label class="toggle-label"><input id="hlsProxyGlobal" type="checkbox"> Enable HLS compatibility service</label>
-    <label>Global default mode<select id="hlsDefaultMode"><option value="direct">Direct</option><option value="compat">Playlist Compatibility</option><option value="fixed">Fixed Variant + Compatibility</option><option value="protected">Protected Playback (recommended)</option></select></label>
-    <label>Default maximum quality<select id="hlsDefaultHeight"><option value="0">Highest available</option><option value="1080">1080p</option><option value="720">720p</option><option value="540">540p</option><option value="360">360p</option></select></label>
-    <label>Master cache (seconds)<input id="hlsCacheSeconds" type="number" min="1" max="300" value="15"></label>
-    <label>Protected prefetch segments<input id="hlsProtectedPrefetch" type="number" min="0" max="8" value="2"></label>
-    <label>Protected segment deadline (seconds)<input id="hlsProtectedTimeout" type="number" min="5" max="60" step="1" value="15"></label>
-    <label>Protected attempts<input id="hlsProtectedRetries" type="number" min="1" max="4" value="2"></label>
-    <label>Protected disk cache (MB)<input id="hlsProtectedCacheLimit" type="number" min="64" max="4096" value="512"></label>
-    <label>Cache retention (seconds)<input id="hlsProtectedRetention" type="number" min="30" max="3600" value="180"></label>
-    <label class="toggle-label"><input id="hlsProtectedSkip" type="checkbox" checked> Skip/reload failed protected segments instead of waiting</label>
-    <button class="primary" type="submit">Save HLS Settings</button>
-  </form>
-  <div class="resource-grid hls-stats">
-    <div><span>Proxy Requests</span><strong id="hlsRequests">0</strong></div>
-    <div><span>Master Resolves</span><strong id="hlsResolves">0</strong></div>
-    <div><span>Cache Hits</span><strong id="hlsCacheHits">0</strong></div>
-    <div><span>Protected Downloads</span><strong id="hlsProtectedDownloads">0</strong></div>
-    <div><span>Protected Cache Hits</span><strong id="hlsProtectedHits">0</strong></div>
-    <div><span>Protected Prefetches</span><strong id="hlsProtectedPrefetches">0</strong></div>
-    <div><span>Protected Timeouts</span><strong id="hlsProtectedTimeouts">0</strong></div>
-    <div><span>Protected Skips</span><strong id="hlsProtectedSkips">0</strong></div>
-    <div><span>Guarded Relays</span><strong id="hlsSegmentRelays">0</strong></div>
-    <div><span>Relay Retries</span><strong id="hlsSegmentRetries">0</strong></div>
-    <div><span>Relay Timeouts</span><strong id="hlsSegmentTimeouts">0</strong></div>
-    <div><span>Cancelled Relays</span><strong id="hlsSegmentDisconnects">0</strong></div>
-    <div><span>URL Recoveries</span><strong id="hlsSegmentRecoveries">0</strong></div>
-    <div><span>Extensionless Fixed</span><strong id="hlsExtensionless">0</strong></div>
-    <div><span>Discontinuities</span><strong id="hlsDiscontinuities">0</strong></div>
-    <div><span>CDN Changes</span><strong id="hlsCdnSwitches">0</strong></div>
-    <div><span>Variant Re-resolves</span><strong id="hlsReresolves">0</strong></div>
-    <div><span>Bypasses</span><strong id="hlsBypasses">0</strong></div>
-    <div><span>Failures</span><strong id="hlsFailures">0</strong></div>
-  </div>
-  <p id="hlsRelayPolicy" class="muted hls-note"></p>
-  <p class="muted hls-note"><b>Direct</b> leaves the stream alone. <b>Compatibility</b> fixes playlist/extensionless URI issues. <b>Fixed</b> also locks adaptive masters to one rendition while normal segments remain direct. <b>Protected</b> locks the rendition and routes every media segment through an atomic disk-backed cache: a segment is published only after the upstream request has fully completed. Failed segments get a bounded reload/skip response instead of an indefinitely open connection. Existing v0.3.3 Fixed selections migrate once to Protected during upgrade. Protected mode addresses upstream segment delivery; use Stream Stabilization below when the media itself has SSAI/timestamp discontinuities.</p>
-</section>
-
-<section class="panel stabilizer-panel">
-  <div class="panel-heading"><div><h2>Stream Stabilization</h2><p>Optional FFmpeg normalization layer for FAST/SSAI feeds with timestamp discontinuities. Remux mode preserves the original codecs while allowing FFmpeg to repair the HLS/MPEG-TS timeline before Jellyfin sees it.</p></div></div>
-  <form id="stabilizerSettingsForm" class="hls-settings hls-settings-v032">
-    <label class="toggle-label"><input id="stabilizerGlobal" type="checkbox" checked> Enable integrated stabilizer</label>
-    <label>Global default<select id="stabilizerDefaultMode"><option value="off">Off</option><option value="remux">Stabilized Remux</option><option value="transcode">Full Software Transcode</option></select></label>
-    <label>DTS delta threshold (s)<input id="stabilizerDtsThreshold" type="number" min="0.1" max="30" step="0.1" value="1.0"></label>
-    <label>Idle shutdown (s)<input id="stabilizerIdleTimeout" type="number" min="15" max="3600" value="60"></label>
-    <label>Stall watchdog (s)<input id="stabilizerStallTimeout" type="number" min="4" max="300" value="8"></label>
-    <label>Startup timeout (s)<input id="stabilizerStartupTimeout" type="number" min="5" max="120" value="15"></label>
-    <label>Ready segments<input id="stabilizerReadySegments" type="number" min="1" max="6" value="2"></label>
-    <label>Output segment length (s)<input id="stabilizerHlsTime" type="number" min="1" max="10" value="3"></label>
-    <label>Playlist segments<input id="stabilizerHlsListSize" type="number" min="4" max="60" value="12"></label>
-    <label>Delete threshold<input id="stabilizerDeleteThreshold" type="number" min="1" max="20" value="4"></label>
-    <label>Max active workers<input id="stabilizerMaxWorkers" type="number" min="1" max="64" value="12"></label>
-    <label class="toggle-label"><input id="stabilizerAutoRestart" type="checkbox" checked> Restart a worker if output stops advancing</label>
-    <label>Transcode preset<select id="stabilizerPreset"><option value="ultrafast">ultrafast</option><option value="superfast">superfast</option><option value="veryfast">veryfast</option><option value="faster">faster</option><option value="fast">fast</option><option value="medium">medium</option></select></label>
-    <label>Transcode CRF<input id="stabilizerCrf" type="number" min="14" max="32" value="20"></label>
-    <label>Transcode audio bitrate<input id="stabilizerAudioBitrate" value="160k"></label>
-    <button class="primary" type="submit">Save Stabilizer Settings</button>
-  </form>
-  <div class="resource-grid hls-stats">
-    <div><span>Configured Channels</span><strong id="stabilizerConfigured">0</strong></div>
-    <div><span>Active Workers</span><strong id="stabilizerActive">0</strong></div>
-    <div><span>Known Workers</span><strong id="stabilizerKnown">0</strong></div>
-    <div><span>Restarts</span><strong id="stabilizerRestarts">0</strong></div>
-    <div><span>Detected Stalls</span><strong id="stabilizerStalls">0</strong></div>
-    <div><span>Worker Errors</span><strong id="stabilizerErrors">0</strong></div>
-  </div>
-  <p class="muted hls-note"><b>Stabilized Remux</b> uses <code>-c:v copy -c:a copy</code>, deliberately omits <code>-copyts</code> and <code>-re</code>, and applies <code>-dts_delta_threshold</code>. <b>Full Software Transcode</b> additionally decodes/re-encodes with libx264/AAC and regenerates timestamps. Workers start only when a stabilized channel is requested and stop after the idle timeout.</p>
-</section>
-
-<section class="panel">
-  <div class="panel-heading"><div><h2>Sources</h2><p>Add URL or uploaded M3U/M3U8 and optional XMLTV. Acquisition and stabilization defaults can be applied to every channel in a source.</p></div></div>
-  <form id="sourceForm" class="source-form"><label>Name<input name="name" required></label><label>M3U URL<input name="m3u_url" type="url"></label><label>or file<input name="m3u_file" type="file"></label><label>XMLTV URL<input name="xml_url" type="url"></label><label>or file<input name="xml_file" type="file"></label><button class="primary" type="submit">Add Source</button></form>
-  <div id="sourceMessage" class="message hidden"></div>
-  <div class="table-wrap"><table><thead><tr><th>Source</th><th>Status</th><th>Channels</th><th>Last refresh</th><th>Guide</th><th>Acquisition</th><th>Stabilization</th><th></th></tr></thead><tbody id="sourcesBody"></tbody></table></div>
-</section>
-
-<section class="panel">
-  <div class="panel-heading"><div><h2>Custom Groups & Numbering</h2><p>Create lineup groups and assign automatic number ranges.</p></div><button id="groupNumberBtn">Number by Groups</button></div>
-  <form id="groupForm" class="group-form"><input id="groupName" placeholder="Sports" required><input id="groupStart" type="number" value="100" min="0"><input id="groupIncrement" type="number" value="1" min="1"><button type="submit">Add Group</button></form><div id="groupsList" class="chips"></div>
-</section>
-
-<section class="panel">
-  <div class="panel-heading"><div><h2>Channel Browser</h2><p>Check rows, run bulk actions, or edit individual channel metadata, acquisition, and stabilization behavior.</p></div></div>
-  <div class="toolbar"><input id="searchInput" type="search" placeholder="Search channel, TVG-ID, source"><select id="sourceFilter"><option value="">All sources</option></select><select id="groupFilter"><option value="">All groups</option></select><button id="checkVisibleBtn">Check Visible</button><button id="clearChecksBtn">Clear Checks</button></div>
-  <div class="bulkbar"><select id="bulkAction"><option value="enable">Add checked to lineup</option><option value="disable">Remove checked from lineup</option><option value="group">Assign custom group</option><option value="clear-numbers">Clear channel numbers</option><option value="hls-mode-inherit">HLS mode: inherit source/global</option><option value="hls-mode-direct">HLS mode: Direct</option><option value="hls-mode-compat">HLS mode: Playlist Compatibility</option><option value="hls-mode-fixed">HLS mode: Fixed Variant + Compatibility</option><option value="hls-mode-protected">HLS mode: Protected Playback</option><option value="hls-default">HLS quality: inherit</option><option value="hls-720">HLS quality: 720p</option><option value="hls-540">HLS quality: 540p</option><option value="hls-360">HLS quality: 360p</option><option value="stabilizer-inherit">Stabilizer: inherit source/global</option><option value="stabilizer-off">Stabilizer: Off</option><option value="stabilizer-remux">Stabilizer: Remux</option><option value="stabilizer-transcode">Stabilizer: Full Transcode</option></select><input id="bulkValue" placeholder="Group name (when needed)"><button id="applyBulkBtn" class="primary">Apply to Checked</button><span id="checkedCount" class="muted">0 checked</span></div>
-  <div class="pager"><button id="prevChannelPage">← Previous</button><span id="channelPageInfo" class="muted">Page 1</span><button id="nextChannelPage">Next →</button></div>
-  <div class="table-wrap browser-wrap"><table><thead><tr><th>✓</th><th>Use</th><th>Channel</th><th>Source</th><th>Group</th><th>TVG-ID</th><th>EPG</th><th>Playback</th><th></th></tr></thead><tbody id="channelsBody"></tbody></table></div>
-</section>
-
-<section class="panel">
-  <div class="panel-heading lineup-head"><div><h2>Master Lineup</h2><p>Drag to reorder. Open Edit for overrides, EPG suggestions, and HLS diagnostics.</p></div><div class="number-tools"><input id="numberStart" type="number" value="1" min="0"><input id="numberIncrement" type="number" value="1" min="1"><select id="numberMode"><option value="sequential">Renumber all</option><option value="fill-gaps">Fill blanks</option></select><button id="autoNumberBtn">Auto Number</button></div></div>
-  <div id="duplicateWarning" class="warning hidden"></div><div class="table-wrap lineup-wrap"><table><thead><tr><th></th><th>#</th><th>Channel</th><th>Source</th><th>Group</th><th>TVG-ID</th><th></th></tr></thead><tbody id="lineupBody"></tbody></table></div>
-</section>
-
+<section class="panel resource-panel"><div class="panel-heading"><div><h2>Resource Monitor</h2><p>Core keeps large IPTV/EPG jobs disk-backed and isolates XML processing in short-lived workers.</p></div><label class="profile-label">Resource Profile<select id="resourceProfile"><option value="low-memory">Low Memory</option><option value="balanced">Balanced</option><option value="performance">Performance</option></select></label></div><div class="resource-grid"><div><span>Web RSS</span><strong id="memWeb">—</strong></div><div><span>Container RAM</span><strong id="memContainer">—</strong></div><div><span>RAM Limit</span><strong id="memLimit">—</strong></div><div><span>Last Refresh Peak</span><strong id="memRefresh">—</strong></div><div><span>Disk Cache</span><strong id="memCache">—</strong></div><div><span>Output Size</span><strong id="memOutput">—</strong></div></div><p class="muted">Low Memory uses 100-row browser pages and keeps only 10 refresh-history records. Refreshes remain sequential in all profiles to avoid overlapping large guides.</p></section>
+<section class="panel"><div class="panel-heading"><div><h2>Sources</h2><p>Add URL or uploaded M3U/M3U8 and optional XMLTV.</p></div></div><form id="sourceForm" class="source-form"><label>Name<input name="name" required></label><label>M3U URL<input name="m3u_url" type="url"></label><label>or file<input name="m3u_file" type="file"></label><label>XMLTV URL<input name="xml_url" type="url"></label><label>or file<input name="xml_file" type="file"></label><button class="primary" type="submit">Add Source</button></form><div id="sourceMessage" class="message hidden"></div><div class="table-wrap"><table><thead><tr><th>Source</th><th>Status</th><th>Channels</th><th>Last refresh</th><th>Guide</th><th></th></tr></thead><tbody id="sourcesBody"></tbody></table></div></section>
+<section class="panel"><div class="panel-heading"><div><h2>Custom Groups & Numbering</h2><p>Create lineup groups and assign automatic number ranges.</p></div><button id="groupNumberBtn">Number by Groups</button></div><form id="groupForm" class="group-form"><input id="groupName" placeholder="Sports" required><input id="groupStart" type="number" value="100" min="0"><input id="groupIncrement" type="number" value="1" min="1"><button type="submit">Add Group</button></form><div id="groupsList" class="chips"></div></section>
+<section class="panel"><div class="panel-heading"><div><h2>Channel Browser</h2><p>Check rows, run bulk actions, or edit individual channel metadata.</p></div></div><div class="toolbar"><input id="searchInput" type="search" placeholder="Search channel, TVG-ID, source"><select id="sourceFilter"><option value="">All sources</option></select><select id="groupFilter"><option value="">All groups</option></select><button id="checkVisibleBtn">Check Visible</button><button id="clearChecksBtn">Clear Checks</button></div><div class="bulkbar"><select id="bulkAction"><option value="enable">Add checked to lineup</option><option value="disable">Remove checked from lineup</option><option value="group">Assign custom group</option><option value="clear-numbers">Clear channel numbers</option></select><input id="bulkValue" placeholder="Group name (when needed)"><button id="applyBulkBtn" class="primary">Apply to Checked</button><span id="checkedCount" class="muted">0 checked</span></div><div class="pager"><button id="prevChannelPage">← Previous</button><span id="channelPageInfo" class="muted">Page 1</span><button id="nextChannelPage">Next →</button></div><div class="table-wrap browser-wrap"><table><thead><tr><th>✓</th><th>Use</th><th>Channel</th><th>Source</th><th>Group</th><th>TVG-ID</th><th>EPG</th><th></th></tr></thead><tbody id="channelsBody"></tbody></table></div></section>
+<section class="panel"><div class="panel-heading lineup-head"><div><h2>Master Lineup</h2><p>Drag to reorder. Open Edit for overrides and EPG suggestions.</p></div><div class="number-tools"><input id="numberStart" type="number" value="1" min="0"><input id="numberIncrement" type="number" value="1" min="1"><select id="numberMode"><option value="sequential">Renumber all</option><option value="fill-gaps">Fill blanks</option></select><button id="autoNumberBtn">Auto Number</button></div></div><div id="duplicateWarning" class="warning hidden"></div><div class="table-wrap lineup-wrap"><table><thead><tr><th></th><th>#</th><th>Channel</th><th>Source</th><th>Group</th><th>TVG-ID</th><th></th></tr></thead><tbody id="lineupBody"></tbody></table></div></section>
 <section class="panel"><div class="panel-heading"><div><h2>Backup & Restore</h2><p>Export SQLite configuration and uploaded source files, or restore a previous backup.</p></div><a class="button" href="/api/backup">Download Backup</a></div><form id="restoreForm" class="restore-form"><input id="restoreFile" type="file" accept=".zip" required><button class="danger" type="submit">Restore Backup</button></form></section>
 <section class="panel"><div class="panel-heading"><div><h2>Refresh Log</h2></div></div><div class="table-wrap"><table><thead><tr><th>Source</th><th>Status</th><th>Started</th><th>Message</th></tr></thead><tbody id="logsBody"></tbody></table></div></section>
 </main>
-
-<div id="editor" class="modal hidden"><div class="modal-card"><div class="modal-head"><h2>Edit Channel</h2><button id="closeEditor">×</button></div><form id="editForm">
-  <input id="editId" type="hidden"><label>Original Name<input id="originalName" disabled></label><label>Display Name<input id="editName" placeholder="Use provider value"></label><label>Channel Number<input id="editNumber" type="number" min="0"></label><label>Custom Group<input id="editGroup" placeholder="Use provider group"></label><label>TVG-ID Override<div class="inline"><input id="editTvg"><button id="suggestEpgBtn" type="button">Suggest EPG</button></div></label><label>Logo URL<input id="editLogo" type="url" placeholder="Use provider logo"></label>
-  <div class="hls-editor">
-    <label>HLS mode<select id="editHlsMode"><option value="">Inherit source/global</option><option value="direct">Direct</option><option value="compat">Playlist Compatibility</option><option value="fixed">Fixed Variant + Compatibility</option><option value="protected">Protected Playback (recommended)</option></select></label>
-    <label>Maximum HLS quality<select id="editHlsHeight"><option value="">Inherit source/global</option><option value="0">Highest available</option><option value="1080">1080p</option><option value="720">720p</option><option value="540">540p</option><option value="360">360p</option></select></label>
-    <label>Stabilization<select id="editStabilizerMode"><option value="">Inherit source/global</option><option value="off">Off</option><option value="remux">Stabilized Remux</option><option value="transcode">Full Software Transcode</option></select></label>
-    <div class="hls-button-row"><button id="analyzeHlsBtn" type="button">Analyze HLS</button><button id="hlsDiagnosticsBtn" type="button">HLS Diagnostics</button><button id="stabilizerDiagnosticsBtn" type="button">Stabilizer Diagnostics</button></div>
-    <div id="hlsAnalysis" class="hls-analysis muted">Protected Playback guards acquisition and complete-segment delivery. Stream Stabilization handles timestamp/SSAI normalization. Fixed remains available when direct-to-CDN media delivery is preferred.</div>
-    <div id="hlsDiagnostics" class="hls-analysis muted hidden"></div>
-    <div id="stabilizerAnalysis" class="hls-analysis muted">Stabilization is inherited from the source unless overridden here.</div>
-    <div id="stabilizerDiagnostics" class="hls-analysis muted hidden"></div>
-  </div>
-  <div id="epgSuggestions" class="suggestions"></div><div class="modal-actions"><button type="button" id="cancelEditor">Cancel</button><button class="primary" type="submit">Save Changes</button></div>
-</form></div></div>
-<div id="toast" class="toast hidden"></div><script src="/static/app.js"></script>
-</body></html>
+<div id="editor" class="modal hidden"><div class="modal-card"><div class="modal-head"><h2>Edit Channel</h2><button id="closeEditor">×</button></div><form id="editForm"><input id="editId" type="hidden"><label>Original Name<input id="originalName" disabled></label><label>Display Name<input id="editName" placeholder="Use provider value"></label><label>Channel Number<input id="editNumber" type="number" min="0"></label><label>Custom Group<input id="editGroup" placeholder="Use provider group"></label><label>TVG-ID Override<div class="inline"><input id="editTvg"><button id="suggestEpgBtn" type="button">Suggest EPG</button></div></label><label>Logo URL<input id="editLogo" type="url" placeholder="Use provider logo"></label><div id="epgSuggestions" class="suggestions"></div><div class="modal-actions"><button type="button" id="cancelEditor">Cancel</button><button class="primary" type="submit">Save Changes</button></div></form></div></div>
+<div id="toast" class="toast hidden"></div><script src="/static/app.js"></script></body></html>

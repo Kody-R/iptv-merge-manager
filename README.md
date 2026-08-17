@@ -1,6 +1,13 @@
-# IPTV Merge Manager v0.4.0
+# IPTV Merge Manager v0.5.0 Core
 
-A self-hosted Docker application that combines multiple IPTV M3U/M3U8 channel lists and optional XMLTV guides into one curated master lineup.
+A lean self-hosted Docker application focused on the original IPTV Merge Manager job: combine multiple IPTV M3U/M3U8 channel lists and optional XMLTV guides into one curated master lineup and guide.
+
+
+## v0.5.0 Core direction
+
+This release intentionally returns IPTV Merge Manager to playlist and guide management only. Media-proxy, HLS protection, FFmpeg stabilization, stream-repair workers, and playback diagnostics are **not part of this container**. Those experiments live in the separate Samsung TV Plus Stream Lab container.
+
+Existing v0.4.x SQLite databases can be reused. Extra playback/stabilizer columns are left in place but ignored. On startup, `master.m3u` is regenerated from each channel's original provider `stream_url`, so old `/hls/channel/...` and `/stabilized/channel/...` routes are not emitted by the Core release.
 
 ## Features
 
@@ -23,149 +30,6 @@ A self-hosted Docker application that combines multiple IPTV M3U/M3U8 channel li
 - Generated `/output/master.xml`
 - XMLTV output filtered to selected TVG IDs
 - Refresh history in the web UI
-- Integrated source-level and per-channel stream stabilization
-- On-demand FFmpeg timestamp-normalization workers with watchdog recovery
-
-
-## v0.4.0 Integrated Stream Stabilization
-
-v0.4.0 folds the experimental stream stabilizer directly into IPTV Merge Manager. A source can now opt all of its channels into stabilization, while individual channels can inherit or override that source policy. Jellyfin still consumes the single normal `master.m3u`; IPTVMM chooses the correct playback path per channel.
-
-The recommended path for troublesome FAST/SSAI feeds is:
-
-```text
-provider -> Protected acquisition -> Stabilized Remux -> Jellyfin
-```
-
-**Stabilized Remux** launches FFmpeg only while a channel is being watched. It copies the original video/audio codecs, deliberately omits `-copyts` and `-re`, and applies `-dts_delta_threshold` so FFmpeg can normalize HLS/MPEG-TS timestamp discontinuities before Jellyfin sees them. **Full Software Transcode** is an optional stronger fallback using libx264/AAC plus generated timestamps.
-
-Highlights:
-
-- Source-level stabilization: Off / Remux / Full Transcode / Inherit Global.
-- Per-channel stabilization override with bulk actions.
-- Stabilization is independent from acquisition mode, so Protected + Stabilized Remux can be combined.
-- On-demand FFmpeg workers; no worker exists for an unwatched channel.
-- Shared per-channel output for multiple viewers.
-- Automatic idle shutdown (60 seconds default).
-- Output-stall watchdog (8 seconds default) with automatic restart.
-- Configurable `-dts_delta_threshold` (1.0 second default).
-- Rolling local MPEG-TS HLS output with atomic temporary-file publication.
-- Global worker cap (12 default).
-- Per-channel runtime diagnostics including PID, command, starts, restarts, stalls, output age, and last error.
-- Stabilizer logs under `/app/data/logs/stabilizer`.
-- FFmpeg is included in the Docker image; no GPU mapping is required for Remux or the default software-transcode fallback.
-- Upgrades from a source-built v0.3.x container must rebuild the image (`docker compose up -d --build`) so FFmpeg is installed.
-
-
-## v0.3.4 Protected Playback
-
-v0.3.4 changes the reliability strategy for problem HLS channels. Instead of exposing an upstream segment to Jellyfin while it is still downloading, **Protected Playback downloads the complete segment into a bounded disk cache first and only publishes the file after the upstream request has completed successfully**.
-
-```text
-provider/CDN -> IPTVMM temporary .part file -> validation -> atomic rename -> Jellyfin
-```
-
-If the upstream segment stalls during a commercial break, CDN transition, or SSAI discontinuity, the partial `.part` file is discarded. Jellyfin never receives the incomplete body. IPTVMM retries with a fresh connection and can refresh the same HLS media sequence to recover a changed provider URL. If the segment still cannot be acquired, IPTVMM returns a bounded failure/reload response instead of leaving FFmpeg attached to an indefinitely open request.
-
-Protected mode also:
-
-- locks adaptive masters to the configured maximum rendition, as Fixed mode does;
-- routes **all media segments** through the protected disk cache, including ordinary `.ts` URLs;
-- prefetches the newest 2 segments by default;
-- reuses completed segment files for repeated/concurrent requests;
-- defaults to a 15-second whole-segment deadline and 2 attempts;
-- defaults to a 512 MB disk-cache ceiling with 180-second retention;
-- stores segment payloads on disk rather than buffering whole streams in Python RAM;
-- exposes protected download/cache/prefetch/timeout/skip counters in the dashboard and per-channel diagnostics;
-- keeps Direct, Compatibility, and Fixed modes available for channels that do not need full protection.
-
-### Upgrade behavior
-
-Existing v0.3.3 channels, source defaults, or the global default explicitly set to **Fixed Variant + Compatibility** migrate once to **Protected Playback**. This is intentional: Fixed mode was normally enabled for the same unstable adaptive feeds v0.3.4 is designed to protect. You can switch any channel/source back to Fixed after the upgrade.
-
-### Recommended problem-channel settings
-
-- HLS mode: **Protected Playback**
-- Maximum quality: **720p** initially
-- Prefetch: **2 segments**
-- Segment deadline: **15 seconds**
-- Attempts: **2**
-- Skip/reload failed protected segments: **On**
-- Disk cache: **512 MB**
-- Cache retention: **180 seconds**
-
-Protected mode increases network traffic through IPTV Merge Manager and uses temporary disk I/O, but it still does not transcode video. The application remains a single Uvicorn worker and the large media payloads are disk-backed, with the design goal of keeping normal container RAM usage below roughly 1 GB on typical home deployments.
-
-
-## v0.3.3 Guarded HLS Segment Resilience
-
-v0.3.3 keeps the v0.3.2 HLS compatibility modes and adds a selective safety relay for the exceptional media URLs that v0.3.2 normalized to synthetic `.ts`/`.m4s`/audio aliases. This specifically targets providers that hang on commercial/ad-break segments instead of returning an error.
-
-Normal media traffic is still direct:
-
-```text
-ordinary .ts/.m4s segment -> Jellyfin fetches provider/CDN directly
-extensionless/unsupported compatibility segment -> IPTVMM guarded relay -> provider/CDN
-```
-
-The guarded relay:
-
-- acquires the first media bytes before committing a response to Jellyfin;
-- retries a pre-media failure a bounded number of times;
-- refreshes the same upstream media playlist on a pre-media failure and follows a replacement URL only when it still represents the exact same HLS media sequence;
-- aborts a segment that stops producing bytes;
-- enforces an overall per-attempt deadline;
-- cancels the upstream HTTP request when the downstream request disappears;
-- never restarts a segment after partial bytes were already emitted, avoiding concatenated/corrupt media;
-- adds relay/retry/timeout/cancellation diagnostics to the dashboard and per-channel HLS diagnostics.
-
-Default safeguards are configurable through environment variables:
-
-```yaml
-HLS_SEGMENT_CONNECT_TIMEOUT: "4"
-HLS_SEGMENT_FIRST_BYTE_TIMEOUT: "6"
-HLS_SEGMENT_READ_IDLE_TIMEOUT: "10"
-HLS_SEGMENT_TOTAL_TIMEOUT: "20"
-HLS_SEGMENT_PLAYLIST_REFRESH_TIMEOUT: "4"
-HLS_SEGMENT_MAX_ATTEMPTS: "2"
-```
-
-These controls apply only to synthetic compatibility segment aliases. They do not turn IPTV Merge Manager into a full IPTV proxy or transcoder.
-
-## v0.3.1 Adaptive HLS Variant Lock
-
-v0.3.1 adds an opt-in playback-reliability path for adaptive HLS channels that expose multiple quality renditions and behave poorly when Jellyfin/FFmpeg opens the full master playlist.
-
-For an enabled channel, IPTV Merge Manager now:
-
-1. Keeps the provider's stable/original stream URL in SQLite.
-2. Resolves the current upstream HLS master when playback starts.
-3. Selects one rendition (720p maximum by default).
-4. Fetches only that rendition's small media playlist.
-5. Rewrites relative segment/key URIs to absolute upstream CDN URLs.
-6. Returns the rewritten playlist to Jellyfin.
-7. Leaves all `.ts`/media traffic direct between Jellyfin and the provider/CDN.
-
-This prevents Jellyfin from seeing several video/audio programs at the same time while keeping IPTV Merge Manager's CPU, RAM, and network load very small. If a master uses a separate HLS audio group, v0.3.1 returns a one-variant mini-master so that audio group is retained.
-
-### Enable it for a problem channel
-
-Open **Channel Browser → Edit** for the channel, then:
-
-- Check **Enable HLS Variant Lock for this channel**.
-- Leave **Maximum HLS quality** at **Use global default** (720p initially), or choose another cap.
-- Click **Analyze HLS** to verify available variants and which one will be selected.
-- Save the channel.
-
-You can also enable/disable variant lock or assign 720p/540p/360p caps to multiple checked channels using the Channel Browser bulk-action menu.
-
-The **Adaptive HLS Variant Lock** dashboard panel controls the global service, default quality cap, short master-manifest cache, and runtime request/error counters.
-
-### Important behavior
-
-Variant lock is **off per channel by default** after upgrading. Existing streams remain unchanged until you enable it for a channel. This avoids adding an HLS probe to every IPTV stream in a large lineup.
-
-The generated `master.m3u` uses the same host/port Jellyfin used to request the playlist when expanding internal variant-lock URLs, so normal direct-IP and CasaOS LAN usage do not require a hard-coded server address.
 
 ## Requirements
 
@@ -175,8 +39,8 @@ The generated `master.m3u` uses the same host/port Jellyfin used to request the 
 ## Install
 
 ```bash
-unzip iptv-merge-manager-v0.3.4.zip
-cd iptv-merge-manager-v0.3.4
+unzip iptv-merge-manager-v0.5.0-core.zip
+cd iptv-merge-manager-v0.5.0-core
 docker compose up -d --build
 ```
 
@@ -198,7 +62,7 @@ For Jellyfin, add the M3U URL as an M3U tuner and the XML URL as an XMLTV guide 
 
 ## CasaOS / GitHub deployment
 
-v0.3.0 includes a CasaOS Compose template and an automated GitHub Container Registry workflow. See `GITHUB-CASAOS.md` for the recommended setup. Once published, CasaOS can pull the prebuilt image from GHCR rather than building the application locally.
+v0.5.0 includes a CasaOS Compose template and an automated GitHub Container Registry workflow. See `GITHUB-CASAOS.md` for the recommended setup. Once published, CasaOS can pull the prebuilt image from GHCR rather than building the application locally.
 
 Files added for this workflow:
 
@@ -252,7 +116,7 @@ environment:
   REFRESH_HOURS: "4"
 ```
 
-Supported integer values should divide sensibly into a 24-hour day. v0.3.0 is designed around the default four-hour cycle.
+Supported integer values should divide sensibly into a 24-hour day. v0.5.0 is designed around the default four-hour cycle.
 
 ## Source refresh safety
 
@@ -284,15 +148,15 @@ The generated M3U includes `tvg-id`, `tvg-name`, `tvg-logo`, `group-title`, and 
 
 ## XMLTV behavior
 
-v0.3.0 associates a selected channel with XMLTV from its own source using `tvg-id`. Only matching `<channel>` and `<programme>` records are copied into `master.xml`.
+v0.5.0 associates a selected channel with XMLTV from its own source using `tvg-id`. Only matching `<channel>` and `<programme>` records are copied into `master.xml`.
 
-Channels without a TVG-ID can still be streamed in `master.m3u`, but they will not contribute guide entries to `master.xml` in v0.3.0.
+Channels without a TVG-ID can still be streamed in `master.m3u`, but they will not contribute guide entries to `master.xml` in v0.5.0.
 
 Cross-provider manual EPG mapping is intentionally reserved for a later release.
 
 ## Security note
 
-v0.3.0 does not include login/authentication. It is intended for a trusted home LAN. Do not expose port 8080 directly to the public Internet without placing it behind your own authenticated reverse proxy or VPN.
+v0.5.0 does not include login/authentication. It is intended for a trusted home LAN. Do not expose port 8080 directly to the public Internet without placing it behind your own authenticated reverse proxy or VPN.
 
 Also note that source URLs are stored in the local SQLite database. If a provider embeds credentials/tokens in its URL, protect the `data` directory accordingly.
 
@@ -330,33 +194,7 @@ docker compose up -d --build
 
 The persistent `data` and `output` folders remain on the host.
 
-## v0.3.4 highlights
-
-- New **Protected Playback** HLS mode.
-- Full segment acquisition to disk before any protected media bytes are served to Jellyfin.
-- Temporary `.part` files are atomically renamed only after complete download/validation.
-- Ordinary `.ts` segments are protected too; this is no longer limited to extensionless compatibility aliases.
-- Whole-segment deadline, bounded attempts, same-sequence URL recovery, and fresh connections.
-- Two-segment prefetch by default with single-flight de-duplication and disk-cache reuse.
-- Failed protected segments return a bounded reload/skip response instead of an indefinitely open stream.
-- 512 MB / 180-second bounded disk cache defaults; stale and over-limit files are cleaned automatically.
-- Existing v0.3.3 Fixed mode selections migrate once to Protected.
-- Direct, Compatibility, and legacy Fixed modes remain available.
-- No transcoding is performed by IPTV Merge Manager.
-
-## v0.3.3 highlights
-
-- Selective guarded relay for extensionless/unsupported HLS compatibility segments.
-- 4-second connect, 6-second first-media, 10-second read-idle, and 20-second per-attempt safeguards by default.
-- Maximum two pre-media attempts by default.
-- Mid-segment stale-data watchdog closes the segment instead of leaving FFmpeg blocked indefinitely.
-- Downstream disconnect cancellation closes the corresponding upstream HTTP request.
-- Same-media-sequence URL recovery after a failed ad/CDN segment when the refreshed playlist republishes that sequence at a new URL.
-- New relay/retry/timeout/cancellation/recovery runtime counters and channel events.
-- Ordinary `.ts`, `.m4s`, audio, key, and other recognized media URLs remain direct to the provider/CDN.
-- No FFmpeg, transcoding, or full-stream media proxy was added to IPTV Merge Manager.
-
-## v0.3.1 highlights
+## v0.5.0 highlights
 
 - Channel metadata overrides
 - Bulk channel operations
@@ -365,15 +203,10 @@ The persistent `data` and `output` folders remain on the host.
 - EPG match suggestions
 - Expanded dashboard
 - Configuration backup and restore
-- Per-channel adaptive HLS variant lock
-- 720p default rendition cap with per-channel overrides
-- HLS analyzer and runtime proxy counters
-- Dynamic provider-manifest re-resolution
-- Direct-to-CDN media segment delivery
 
-## v0.3.0 low-memory architecture
+## v0.5.0 low-memory architecture
 
-v0.3.0 is designed for small CasaOS systems and large IPTV/XMLTV feeds. The long-running FastAPI process no longer parses XMLTV or retains provider payloads. Heavy refresh, EPG, and output work runs in a short-lived worker process, which returns its memory to the operating system when the job ends.
+v0.5.0 is designed for small CasaOS systems and large IPTV/XMLTV feeds. The long-running FastAPI process no longer parses XMLTV or retains provider payloads. Heavy refresh, EPG, and output work runs in a short-lived worker process, which returns its memory to the operating system when the job ends.
 
 Resource changes include:
 

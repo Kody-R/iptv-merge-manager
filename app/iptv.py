@@ -15,12 +15,10 @@ import httpx
 from lxml import etree
 
 from .db import connect, get_setting
-from .hls_proxy import effective_hls_mode
-from .stabilizer import effective_stabilizer_mode
 
-DATA_DIR = Path('/app/data')
+DATA_DIR = Path(os.getenv('IPTVMM_DATA_DIR', '/app/data'))
 CACHE_DIR = DATA_DIR / 'cache'
-OUTPUT_DIR = Path('/app/output')
+OUTPUT_DIR = Path(os.getenv('IPTVMM_OUTPUT_DIR', '/app/output'))
 ATTR_RE = re.compile(r'([A-Za-z0-9_-]+)="([^"]*)"')
 CHUNK_SIZE = 256 * 1024
 
@@ -81,7 +79,7 @@ def iter_m3u(path: Path) -> Iterator[dict]:
 
 
 async def _download_to_file(url: str, destination: Path) -> None:
-    headers = {'User-Agent': 'IPTV-Merge-Manager/0.4.0'}
+    headers = {'User-Agent': 'IPTV-Merge-Manager/0.5.0'}
     timeout = httpx.Timeout(90.0, connect=20.0)
     destination.parent.mkdir(parents=True, exist_ok=True)
     tmp = destination.with_suffix(destination.suffix + '.download')
@@ -301,18 +299,12 @@ def generate_master_m3u() -> int:
     out = OUTPUT_DIR / 'master.m3u'
     tmp = OUTPUT_DIR / 'master.m3u.tmp'
     count = 0
-    global_proxy_enabled = get_setting('hls_proxy_enabled', '1') == '1'
-    global_mode = get_setting('hls_proxy_default_mode', 'direct')
-    stabilizer_enabled = get_setting('stabilizer_enabled', '1') == '1'
-    global_stabilizer_mode = get_setting('stabilizer_default_mode', 'off')
     with connect() as conn, tmp.open('w', encoding='utf-8', newline='\n') as fh:
         fh.write('#EXTM3U\n')
         cursor = conn.execute(
-            """SELECT c.*,s.hls_mode source_hls_mode,s.hls_max_height source_hls_max_height,
-                      s.stabilizer_mode source_stabilizer_mode
-               FROM channels c JOIN sources s ON s.id=c.source_id
+            '''SELECT c.* FROM channels c JOIN sources s ON s.id=c.source_id
                WHERE c.selected=1 AND c.is_active=1 AND s.enabled=1
-               ORDER BY c.sort_order,c.id"""
+               ORDER BY c.sort_order,c.id'''
         )
         for row in cursor:
             name = row['custom_name'] or row['name']
@@ -325,17 +317,7 @@ def generate_master_m3u() -> int:
             if logo: attrs.append(f'tvg-logo="{m3u_escape(logo)}"')
             if group_title: attrs.append(f'group-title="{m3u_escape(group_title)}"')
             if row['channel_number'] is not None: attrs.append(f'tvg-chno="{row["channel_number"]}"')
-            stream_url = row['stream_url']
-            mode = effective_hls_mode(row['hls_mode'], row['source_hls_mode'], global_mode)
-            stab_mode = effective_stabilizer_mode(row['stabilizer_mode'], row['source_stabilizer_mode'], global_stabilizer_mode)
-            if stabilizer_enabled and stab_mode != 'off':
-                # Stabilization is a final media-normalization layer. Its internal FFmpeg worker
-                # still honors this channel's acquisition/HLS mode when selecting its input.
-                stream_url = f'__IPTVMM_BASE__/stabilized/channel/{row["id"]}/index.m3u8'
-            elif global_proxy_enabled and mode != 'direct':
-                # The output endpoint expands this token to the exact scheme/host/port Jellyfin used.
-                stream_url = f'__IPTVMM_BASE__/hls/channel/{row["id"]}/index.m3u8'
-            fh.write(f"#EXTINF:-1 {' '.join(attrs)},{name}\n{stream_url}\n")
+            fh.write(f"#EXTINF:-1 {' '.join(attrs)},{name}\n{row['stream_url']}\n")
             count += 1
     os.replace(tmp, out)
     return count
@@ -363,7 +345,7 @@ def generate_master_xml() -> tuple[int, int]:
 
     with etree.xmlfile(str(tmp), encoding='utf-8') as xf:
         xf.write_declaration()
-        with xf.element('tv', {'generator-info-name': 'IPTV Merge Manager v0.4.0'}):
+        with xf.element('tv', {'generator-info-name': 'IPTV Merge Manager v0.5.0'}):
             for tag in ('channel', 'programme'):
                 with connect() as conn:
                     source_ids = [r['source_id'] for r in conn.execute(

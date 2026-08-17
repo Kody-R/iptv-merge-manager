@@ -3,16 +3,18 @@ from __future__ import annotations
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
+import os
 from typing import Iterable
 
-DATA_DIR = Path('/app/data')
+DATA_DIR = Path(os.getenv('IPTVMM_DATA_DIR', '/app/data'))
+OUTPUT_DIR = Path(os.getenv('IPTVMM_OUTPUT_DIR', '/app/output'))
 DB_PATH = DATA_DIR / 'iptv.db'
 
 
 def ensure_dirs() -> None:
     (DATA_DIR / 'cache').mkdir(parents=True, exist_ok=True)
     (DATA_DIR / 'uploads').mkdir(parents=True, exist_ok=True)
-    Path('/app/output').mkdir(parents=True, exist_ok=True)
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
 @contextmanager
@@ -48,7 +50,6 @@ def init_db() -> None:
                 last_refresh TEXT,
                 last_error TEXT,
                 channel_count INTEGER NOT NULL DEFAULT 0,
-                stabilizer_mode TEXT NOT NULL DEFAULT 'off',
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
 
@@ -64,7 +65,6 @@ def init_db() -> None:
                 selected INTEGER NOT NULL DEFAULT 0,
                 sort_order INTEGER NOT NULL DEFAULT 0,
                 channel_number INTEGER,
-                stabilizer_mode TEXT,
                 is_active INTEGER NOT NULL DEFAULT 1,
                 first_seen TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 last_seen TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -112,33 +112,14 @@ def init_db() -> None:
 
         # Additive migrations from v0.1/v0.2 databases.
         cols = {r[1] for r in conn.execute('PRAGMA table_info(channels)').fetchall()}
-        added_hls_mode = 'hls_mode' not in cols
         for name, ddl in {
             'custom_name': 'TEXT',
             'custom_group': 'TEXT',
             'custom_tvg_id': 'TEXT',
             'custom_logo': 'TEXT',
-            'hls_proxy_enabled': 'INTEGER NOT NULL DEFAULT 0',
-            'hls_max_height': 'INTEGER',
-            'hls_mode': 'TEXT',
-            'stabilizer_mode': 'TEXT',
         }.items():
             if name not in cols:
                 conn.execute(f'ALTER TABLE channels ADD COLUMN {name} {ddl}')
-
-        source_cols = {r[1] for r in conn.execute('PRAGMA table_info(sources)').fetchall()}
-        for name, ddl in {
-            'hls_mode': "TEXT NOT NULL DEFAULT 'inherit'",
-            'hls_max_height': 'INTEGER',
-            'stabilizer_mode': "TEXT NOT NULL DEFAULT 'off'",
-        }.items():
-            if name not in source_cols:
-                conn.execute(f'ALTER TABLE sources ADD COLUMN {name} {ddl}')
-
-        # v0.3.1 had a boolean per-channel variant lock. Preserve that behavior exactly
-        # on first v0.3.2 migration: ON -> fixed+compatibility; OFF -> direct.
-        if added_hls_mode:
-            conn.execute("UPDATE channels SET hls_mode=CASE WHEN hls_proxy_enabled=1 THEN 'fixed' ELSE 'direct' END")
 
         log_cols = {r[1] for r in conn.execute('PRAGMA table_info(refresh_log)').fetchall()}
         if 'peak_rss_kb' not in log_cols:
@@ -146,41 +127,6 @@ def init_db() -> None:
 
         conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('resource_profile','low-memory')")
         conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('history_limit','10')")
-        conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('hls_proxy_enabled','1')")
-        conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('hls_proxy_default_height','720')")
-        conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('hls_proxy_default_mode','direct')")
-        conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('hls_proxy_cache_seconds','15')")
-        conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('hls_protected_prefetch','2')")
-        conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('hls_protected_segment_timeout','15')")
-        conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('hls_protected_retries','2')")
-        conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('hls_protected_skip_failed','1')")
-        conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('hls_protected_cache_limit_mb','512')")
-        conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('hls_protected_cache_retention','180')")
-        conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('stabilizer_enabled','1')")
-        conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('stabilizer_default_mode','off')")
-        conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('stabilizer_idle_timeout','60')")
-        conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('stabilizer_stall_timeout','8')")
-        conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('stabilizer_startup_timeout','15')")
-        conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('stabilizer_ready_segments','2')")
-        conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('stabilizer_hls_time','3')")
-        conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('stabilizer_hls_list_size','12')")
-        conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('stabilizer_hls_delete_threshold','4')")
-        conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('stabilizer_dts_delta_threshold','1.0')")
-        conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('stabilizer_auto_restart','1')")
-        conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('stabilizer_max_workers','12')")
-        conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('stabilizer_x264_preset','veryfast')")
-        conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('stabilizer_x264_crf','20')")
-        conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('stabilizer_audio_bitrate','160k')")
-
-        # v0.3.4 is reliability-first. Existing Fixed channels/sources were generally enabled
-        # to work around unstable adaptive feeds, so migrate them once to Protected mode.
-        # Users can explicitly switch back to Fixed afterward if they prefer direct CDN segments.
-        marker = conn.execute("SELECT value FROM app_settings WHERE key='hls_v034_protected_migrated'").fetchone()
-        if not marker:
-            conn.execute("UPDATE channels SET hls_mode='protected',hls_proxy_enabled=1 WHERE hls_mode='fixed'")
-            conn.execute("UPDATE sources SET hls_mode='protected' WHERE hls_mode='fixed'")
-            conn.execute("UPDATE app_settings SET value='protected' WHERE key='hls_proxy_default_mode' AND value='fixed'")
-            conn.execute("INSERT INTO app_settings(key,value) VALUES('hls_v034_protected_migrated','1')")
 
 
 def get_setting(key: str, default: str) -> str:
