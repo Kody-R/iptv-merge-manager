@@ -1,10 +1,36 @@
-## Automatic include-all source mode (v0.3.1)
+# IPTV Merge Manager v0.5.1 Core
 
-In **Sources**, choose **Include all (sync)** for a playlist that changes every four hours. The manager automatically selects and assigns unused channel numbers to newly discovered channels, removes missing channels from both generated outputs on successful refresh, and restores returning channels. Existing channel numbers and metadata overrides are preserved. Choose **Manual** for sources where you want to curate channels. Existing installations default to Manual until you opt in. An unexpectedly large playlist drop (>50% with 20+ previous channels) is rejected to protect the last-known-good lineup.
+A lean self-hosted Docker application focused on the original IPTV Merge Manager job: combine multiple IPTV M3U/M3U8 channel lists and optional XMLTV guides into one curated master lineup and guide.
 
-# IPTV Merge Manager v0.3.1
 
-A self-hosted Docker application that combines multiple IPTV M3U/M3U8 channel lists and optional XMLTV guides into one curated master lineup.
+## v0.5.1 — Automatic Include All synchronization
+
+Each playlist source can use **Manual** (default for existing sources) or **Include All (Sync)**.
+In Include All mode, every successfully refreshed channel is included in the master M3U.
+New channels automatically receive numbers after the highest previously assigned number,
+and channels missing from the latest successful provider playlist are excluded from
+both master outputs. Existing channel settings and numbers are retained so channels
+can return without losing customizations. Switching an existing source to Include All
+immediately includes its currently active channels and regenerates the outputs.
+Switching it back to Manual stops automatic inclusion, but does not deselect the
+channels that were already included.
+
+All three outputs (`master.m3u`, `master.xml`, and `master.xml.gz`) are regenerated
+after each scheduled/manual refresh. XMLTV still requires a matching TVG-ID. To avoid
+misleading output on provider failures, empty or invalid feeds and >50% sudden channel
+losses (for playlists with at least 20 channels) are still rejected. A legitimate
+>50% provider reduction requires deliberately adjusting the safety policy; this
+release does not silently disable that protection.
+
+**Upgrade:** Keep existing `/app/data` and `/app/output` volumes. SQLite adds one
+`selection_mode` column and defaults existing sources to Manual. Back up your data
+folder before upgrading from v0.4/v0.5.
+
+## v0.5.0 Core direction
+
+This release intentionally returns IPTV Merge Manager to playlist and guide management only. Media-proxy, HLS protection, FFmpeg stabilization, stream-repair workers, and playback diagnostics are **not part of this container**. Those experiments live in the separate Samsung TV Plus Stream Lab container.
+
+Existing v0.4.x SQLite databases can be reused. Extra playback/stabilizer columns are left in place but ignored. On startup, `master.m3u` is regenerated from each channel's original provider `stream_url`, so old `/hls/channel/...` and `/stabilized/channel/...` routes are not emitted by the Core release.
 
 ## Features
 
@@ -13,6 +39,7 @@ A self-hosted Docker application that combines multiple IPTV M3U/M3U8 channel li
 - Optional XMLTV URL or uploaded `.xml` / `.xml.gz`
 - Persistent SQLite channel catalog and lineup
 - Individual channel selection
+- Per-source Manual / Include All (Sync) automatic channel selection
 - Search, source filtering, and group filtering
 - Drag-and-drop master lineup ordering
 - Manual channel numbers
@@ -36,8 +63,8 @@ A self-hosted Docker application that combines multiple IPTV M3U/M3U8 channel li
 ## Install
 
 ```bash
-unzip iptv-merge-manager-v0.3.1.zip
-cd iptv-merge-manager-v0.3.1
+unzip iptv-merge-manager-v0.5.1.zip
+cd iptv-merge-manager-v0.5.1
 docker compose up -d --build
 ```
 
@@ -59,7 +86,7 @@ For Jellyfin, add the M3U URL as an M3U tuner and the XML URL as an XMLTV guide 
 
 ## CasaOS / GitHub deployment
 
-v0.3.1 includes a CasaOS Compose template and an automated GitHub Container Registry workflow. See `GITHUB-CASAOS.md` for the recommended setup. Once published, CasaOS can pull the prebuilt image from GHCR rather than building the application locally.
+v0.5.0 includes a CasaOS Compose template and an automated GitHub Container Registry workflow. See `GITHUB-CASAOS.md` for the recommended setup. Once published, CasaOS can pull the prebuilt image from GHCR rather than building the application locally.
 
 Files added for this workflow:
 
@@ -113,7 +140,7 @@ environment:
   REFRESH_HOURS: "4"
 ```
 
-Supported integer values should divide sensibly into a 24-hour day. v0.3.1 is designed around the default four-hour cycle.
+Supported integer values should divide sensibly into a 24-hour day. v0.5.0 is designed around the default four-hour cycle.
 
 ## Source refresh safety
 
@@ -121,7 +148,7 @@ When a refresh fails, the application records the error but does not mark the ex
 
 When a refresh succeeds, channels missing from the new playlist are marked inactive. They are retained in SQLite so their historical lineup state is not immediately destroyed.
 
-New channels are imported as **not selected**. They will not silently appear in your master lineup.
+New channels in **Manual** sources are imported as not selected. Channels in **Include All (Sync)** sources are selected automatically after each successful refresh.
 
 ## Automatic numbering
 
@@ -145,15 +172,15 @@ The generated M3U includes `tvg-id`, `tvg-name`, `tvg-logo`, `group-title`, and 
 
 ## XMLTV behavior
 
-v0.3.1 associates a selected channel with XMLTV from its own source using `tvg-id`. Only matching `<channel>` and `<programme>` records are copied into `master.xml`.
+v0.5.0 associates a selected channel with XMLTV from its own source using `tvg-id`. Only matching `<channel>` and `<programme>` records are copied into `master.xml`.
 
-Channels without a TVG-ID can still be streamed in `master.m3u`, but they will not contribute guide entries to `master.xml` in v0.3.1.
+Channels without a TVG-ID can still be streamed in `master.m3u`, but they will not contribute guide entries to `master.xml` in v0.5.0.
 
 Cross-provider manual EPG mapping is intentionally reserved for a later release.
 
 ## Security note
 
-v0.3.1 does not include login/authentication. It is intended for a trusted home LAN. Do not expose port 8080 directly to the public Internet without placing it behind your own authenticated reverse proxy or VPN.
+v0.5.0 does not include login/authentication. It is intended for a trusted home LAN. Do not expose port 8080 directly to the public Internet without placing it behind your own authenticated reverse proxy or VPN.
 
 Also note that source URLs are stored in the local SQLite database. If a provider embeds credentials/tokens in its URL, protect the `data` directory accordingly.
 
@@ -191,7 +218,7 @@ docker compose up -d --build
 
 The persistent `data` and `output` folders remain on the host.
 
-## v0.3.1 highlights
+## v0.5.0 highlights
 
 - Channel metadata overrides
 - Bulk channel operations
@@ -201,9 +228,9 @@ The persistent `data` and `output` folders remain on the host.
 - Expanded dashboard
 - Configuration backup and restore
 
-## v0.3.1 low-memory architecture
+## v0.5.0 low-memory architecture
 
-v0.3.1 is designed for small CasaOS systems and large IPTV/XMLTV feeds. The long-running FastAPI process no longer parses XMLTV or retains provider payloads. Heavy refresh, EPG, and output work runs in a short-lived worker process, which returns its memory to the operating system when the job ends.
+v0.5.0 is designed for small CasaOS systems and large IPTV/XMLTV feeds. The long-running FastAPI process no longer parses XMLTV or retains provider payloads. Heavy refresh, EPG, and output work runs in a short-lived worker process, which returns its memory to the operating system when the job ends.
 
 Resource changes include:
 

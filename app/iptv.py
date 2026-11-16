@@ -16,9 +16,9 @@ from lxml import etree
 
 from .db import connect, get_setting
 
-DATA_DIR = Path('/app/data')
+DATA_DIR = Path(os.getenv('IPTVMM_DATA_DIR', '/app/data'))
 CACHE_DIR = DATA_DIR / 'cache'
-OUTPUT_DIR = Path('/app/output')
+OUTPUT_DIR = Path(os.getenv('IPTVMM_OUTPUT_DIR', '/app/output'))
 ATTR_RE = re.compile(r'([A-Za-z0-9_-]+)="([^"]*)"')
 CHUNK_SIZE = 256 * 1024
 
@@ -79,7 +79,7 @@ def iter_m3u(path: Path) -> Iterator[dict]:
 
 
 async def _download_to_file(url: str, destination: Path) -> None:
-    headers = {'User-Agent': 'IPTV-Merge-Manager/0.3.0'}
+    headers = {'User-Agent': 'IPTV-Merge-Manager/0.5.1'}
     timeout = httpx.Timeout(90.0, connect=20.0)
     destination.parent.mkdir(parents=True, exist_ok=True)
     tmp = destination.with_suffix(destination.suffix + '.download')
@@ -228,18 +228,18 @@ async def refresh_source(source_id: int) -> dict:
                     raise ValueError(f'Rejected refresh: sudden XMLTV channel loss ({previous_epg} -> {epg_count}); last-known-good cache preserved')
 
         now = utc_now()
-        new_count = changed_count = 0
+        new_count = changed_count = auto_included = auto_numbered = 0
         auto_include = source.get('selection_mode', 'manual') == 'all'
-        auto_numbered = 0
         with connect() as conn:
             conn.execute('CREATE TEMP TABLE seen_keys(stable_key TEXT PRIMARY KEY) WITHOUT ROWID')
             max_order = conn.execute('SELECT COALESCE(MAX(sort_order),0) FROM channels').fetchone()[0]
-            next_number = conn.execute('SELECT COALESCE(MAX(channel_number),0) FROM channels WHERE selected=1 AND is_active=1').fetchone()[0]
+            # Keep existing assignments, including temporarily inactive channels, reserved.
+            next_number = conn.execute('SELECT COALESCE(MAX(channel_number),0) FROM channels').fetchone()[0]
             for item in iter_m3u(m3u_candidate):
                 key = item['stable_key']
                 conn.execute('INSERT OR IGNORE INTO seen_keys(stable_key) VALUES(?)', (key,))
                 old = conn.execute(
-                    'SELECT id,tvg_id,name,group_title,logo,stream_url,selected,channel_number FROM channels WHERE source_id=? AND stable_key=?',
+                    'SELECT id,tvg_id,name,group_title,logo,stream_url,selected FROM channels WHERE source_id=? AND stable_key=?',
                     (source_id, key),
                 ).fetchone()
                 if old:
@@ -251,25 +251,28 @@ async def refresh_source(source_id: int) -> dict:
                     )
                     if auto_include and not old['selected']:
                         conn.execute('UPDATE channels SET selected=1 WHERE id=?', (old['id'],))
+                        auto_included += 1
                 else:
                     max_order += 10
                     new_count += 1
-                    assigned_number = None
+                    number = None
                     if auto_include:
                         next_number += 1
-                        assigned_number = next_number
+                        number = next_number
+                        auto_included += 1
                         auto_numbered += 1
                     conn.execute(
                         '''INSERT INTO channels(source_id,stable_key,tvg_id,name,group_title,logo,stream_url,selected,sort_order,channel_number,is_active,last_seen)
                            VALUES(?,?,?,?,?,?,?,?,?,?,1,?)''',
-                        (source_id,key,item.get('tvg_id'),item['name'],item.get('group_title'),item.get('logo'),item['stream_url'],int(auto_include),max_order,assigned_number,now),
+                        (source_id,key,item.get('tvg_id'),item['name'],item.get('group_title'),item.get('logo'),item['stream_url'],int(auto_include),max_order,number,now),
                     )
-            # Assign numbers only to newly auto-included/un-numbered channels. Never
-            # renumber manually assigned channels or resurrected channels with numbers.
             if auto_include:
-                for row in conn.execute('''SELECT id FROM channels WHERE source_id=? AND selected=1 AND channel_number IS NULL AND stable_key IN (SELECT stable_key FROM seen_keys) ORDER BY sort_order,id''', (source_id,)).fetchall():
+                # Previously known/unselected channels can lack numbers; fill them once.
+                for row in conn.execute('''SELECT id FROM channels
+                      WHERE source_id=? AND selected=1 AND is_active=1 AND channel_number IS NULL
+                      ORDER BY sort_order,id''', (source_id,)):
                     next_number += 1
-                    conn.execute('UPDATE channels SET channel_number=? WHERE id=?', (next_number,row['id']))
+                    conn.execute('UPDATE channels SET channel_number=? WHERE id=?', (next_number, row['id']))
                     auto_numbered += 1
             removed_count = conn.execute(
                 '''SELECT COUNT(*) FROM channels WHERE source_id=? AND is_active=1
@@ -289,13 +292,13 @@ async def refresh_source(source_id: int) -> dict:
             with connect() as conn:
                 conn.execute('DELETE FROM epg_channels WHERE source_id=?', (source_id,))
 
-        msg = f'{count} channels; {new_count} new; {removed_count} removed; {changed_count} changed; {epg_count} EPG channels; {auto_numbered} auto-numbered'
+        msg = f'{count} channels; {new_count} new; {removed_count} removed; {changed_count} changed; {epg_count} EPG channels; {auto_included} auto-included; {auto_numbered} auto-numbered'
         with connect() as conn:
             conn.execute("UPDATE sources SET last_status='OK',last_refresh=?,last_error=NULL,channel_count=? WHERE id=?", (now,count,source_id))
             conn.execute("UPDATE refresh_log SET finished_at=?,status='ok',message=? WHERE id=?", (now,msg,log_id))
         _trim_history()
         gc.collect()
-        return {'source_id':source_id,'status':'ok','channel_count':count,'new':new_count,'removed':removed_count,'changed':changed_count,'epg_channels':epg_count,'auto_numbered':auto_numbered}
+        return {'source_id':source_id,'status':'ok','channel_count':count,'new':new_count,'removed':removed_count,'changed':changed_count,'epg_channels':epg_count,'auto_included':auto_included,'auto_numbered':auto_numbered}
     except Exception as exc:
         m3u_candidate.unlink(missing_ok=True)
         xml_candidate.unlink(missing_ok=True)
@@ -362,7 +365,7 @@ def generate_master_xml() -> tuple[int, int]:
 
     with etree.xmlfile(str(tmp), encoding='utf-8') as xf:
         xf.write_declaration()
-        with xf.element('tv', {'generator-info-name': 'IPTV Merge Manager v0.3.0'}):
+        with xf.element('tv', {'generator-info-name': 'IPTV Merge Manager v0.5.1'}):
             for tag in ('channel', 'programme'):
                 with connect() as conn:
                     source_ids = [r['source_id'] for r in conn.execute(

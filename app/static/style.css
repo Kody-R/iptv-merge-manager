@@ -37,7 +37,7 @@ input, select { width: 100%; border: 1px solid var(--border); background: #0f162
 .panel-heading { padding: 17px 19px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; gap: 18px; }
 .panel-heading h2 { margin: 0; font-size: 17px; }
 .panel-heading p { margin: 4px 0 0; color: var(--muted); font-size: 13px; }
-.source-form { padding: 16px 19px; display: grid; grid-template-columns: 1.15fr 1.5fr 1fr 1.5fr 1fr auto; gap: 12px; align-items: end; background: #111925; }
+.source-form { padding: 16px 19px; display: grid; grid-template-columns: 1.15fr 1.5fr 1fr 1.5fr 1fr 1.2fr auto; gap: 12px; align-items: end; background: #111925; }
 .source-form label, .number-tools label { color: var(--muted); font-size: 12px; }
 .source-form label input, .number-tools label input { margin-top: 5px; }
 .form-action { padding-bottom: 1px; }

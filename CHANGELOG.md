@@ -1,32 +1,31 @@
-## v0.3.1 — Automatic source synchronization
-
-- Per-source Manual or Include All (Sync) mode.
-- On successful refresh, new channels are included automatically and numbered without altering existing channel numbers.
-- Channels missing upstream are removed from generated output via the active flag; they reappear if the provider restores them.
-- Switching an existing source to Include All immediately includes active channels and regenerates output.
-- Failed/suspicious refreshes preserve last-known-good data.
-- Existing sources retain Manual mode by default on upgrade.
-
 # Changelog
 
-## v0.3.1
+## v0.5.1 — Automatic Playlist Synchronization
 
-Resource-optimization release:
+- Forward-ported v0.3.1's per-source Manual / Include All (Sync) option onto v0.5.0 Core.
+- Additive SQLite migration; existing sources stay Manual.
+- Immediate inclusion of active channels when switched to Include All.
+- New channels selected and auto-numbered after successful source refreshes.
+- Disappearing channels excluded from master M3U/XMLTV; returning channels retain metadata and numbers.
+- Every refresh regenerates master.m3u, master.xml and master.xml.gz.
+- Preserves v0.5.0's low-memory worker, original-stream URL output, backup/restore, and refresh safety.
+- Removes accidentally bundled, unused pre-Core proxy/stabilizer modules and obsolete tests.
 
-- Short-lived worker process for refresh, XMLTV parsing, EPG suggestions, and output generation.
-- Streaming HTTP downloads and uploaded-file handling.
-- Streaming M3U parser; no full-playlist string/list retained in RAM.
-- Streaming XMLTV `iterparse` with sibling cleanup.
-- Disk-backed guide cache plus SQLite-only EPG channel index.
-- Sequential source refreshes.
-- Paginated channel browser with Low Memory/Balanced/Performance profiles.
-- Resource Monitor for web RSS, container RAM, worker refresh peak, disk cache, and outputs.
-- Refresh-history retention limits.
-- Atomic temporary-file generation for M3U/XMLTV.
-- New compressed `/output/master.xml.gz` output.
-- Last-known-good protection against empty/invalid feeds and sudden >50% lineup/EPG loss.
-- Single explicit Uvicorn worker and lightweight health check.
-- Preserves v0.2 channel editor, bulk actions, custom groups, numbering, EPG suggestions, dashboard, and backup/restore.
+
+## v0.5.0 Core
+
+Scope-simplification release:
+
+- Returns the application to playlist/XMLTV merge and lineup management only.
+- Removes HLS proxy/protected playback and FFmpeg stabilizer code from the production container.
+- Retains the v0.3 low-memory worker architecture, source safety, channel editor, bulk actions, groups, numbering, EPG suggestions, resource monitor, backup/restore, and compressed XMLTV output.
+- Accepts existing v0.4.x SQLite databases; additive playback columns are ignored.
+- Regenerates `master.m3u` from original stored provider stream URLs on startup.
+- Stream troubleshooting moves to Samsung TV Plus Stream Lab.
+
+## v0.3.0
+
+Resource-optimization release retained as the Core codebase foundation.
 
 ## v0.2.0
 

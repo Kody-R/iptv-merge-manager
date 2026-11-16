@@ -8,10 +8,10 @@ import subprocess
 import sys
 import tempfile
 import uuid
-from typing import Literal
 import zipfile
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Literal
 from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -26,10 +26,10 @@ from .db import DB_PATH, connect, get_setting, init_db, rows_to_dicts, set_setti
 
 APP_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = APP_DIR.parent
-DATA_DIR = Path('/app/data')
+DATA_DIR = Path(os.getenv('IPTVMM_DATA_DIR', '/app/data'))
 UPLOAD_DIR = DATA_DIR / 'uploads'
 CACHE_DIR = DATA_DIR / 'cache'
-OUTPUT_DIR = Path('/app/output')
+OUTPUT_DIR = Path(os.getenv('IPTVMM_OUTPUT_DIR', '/app/output'))
 TZ_NAME = os.getenv('TZ', 'America/New_York')
 REFRESH_HOURS = max(1, int(os.getenv('REFRESH_HOURS', '4')))
 UPLOAD_CHUNK = 256 * 1024
@@ -104,7 +104,7 @@ async def lifespan(app: FastAPI):
     scheduler.shutdown(wait=False)
 
 
-app = FastAPI(title='IPTV Merge Manager', version='0.3.1', lifespan=lifespan)
+app = FastAPI(title='IPTV Merge Manager', version='0.5.1', lifespan=lifespan)
 app.mount('/static', StaticFiles(directory=APP_DIR / 'static'), name='static')
 templates = Jinja2Templates(directory=APP_DIR / 'templates')
 
@@ -207,7 +207,7 @@ def index(request: Request):
 
 @app.get('/health')
 def health():
-    return {'status': 'ok', 'version': '0.3.1'}
+    return {'status': 'ok', 'version': '0.5.1'}
 
 
 @app.get('/api/status')
@@ -233,7 +233,7 @@ def status():
         unnumbered = c.execute('SELECT COUNT(*) FROM channels WHERE selected=1 AND is_active=1 AND channel_number IS NULL').fetchone()[0]
         last_peak = c.execute('SELECT peak_rss_kb FROM refresh_log WHERE peak_rss_kb IS NOT NULL ORDER BY id DESC LIMIT 1').fetchone()
     return {
-        'version': '0.3.1', 'timezone': TZ_NAME, 'refresh_hours': REFRESH_HOURS,
+        'version': '0.5.1', 'timezone': TZ_NAME, 'refresh_hours': REFRESH_HOURS,
         'source_count': source_count, 'active_channels': active, 'selected_channels': selected,
         'with_epg': with_epg, 'missing_epg': missing, 'group_count': groups, 'unnumbered': unnumbered,
         'logs': logs, 'resource_profile': profile, 'default_page_size': cfg['page_size'],
@@ -269,12 +269,11 @@ def sources():
 async def add_source(
     name: str = Form(...), m3u_url: str | None = Form(None), xml_url: str | None = Form(None),
     m3u_file: UploadFile | None = File(None), xml_file: UploadFile | None = File(None),
-    selection_mode: str = Form('manual'),
+    selection_mode: Literal['manual', 'all'] = Form('manual'),
 ):
     name = name.strip(); m3u_url = (m3u_url or '').strip() or None; xml_url = (xml_url or '').strip() or None
     if m3u_file and not m3u_file.filename: m3u_file = None
     if xml_file and not xml_file.filename: xml_file = None
-    if selection_mode not in ('manual', 'all'): raise HTTPException(400, 'Invalid selection mode')
     if not name: raise HTTPException(400, 'Source name is required')
     if not m3u_url and not m3u_file: raise HTTPException(400, 'Provide an M3U URL or file')
     if m3u_url and m3u_file: raise HTTPException(400, 'Use either M3U URL or upload')
@@ -306,17 +305,19 @@ async def add_source(
 async def set_source_mode(sid: int, patch: SourceModePatch):
     async with refresh_lock:
         with connect() as c:
-            source = c.execute('SELECT id FROM sources WHERE id=?', (sid,)).fetchone()
-            if not source:
+            row = c.execute('SELECT id FROM sources WHERE id=?', (sid,)).fetchone()
+            if not row:
                 raise HTTPException(404, 'Source not found')
             c.execute('UPDATE sources SET selection_mode=? WHERE id=?', (patch.selection_mode, sid))
             if patch.selection_mode == 'all':
-                # Include currently available channels immediately, without waiting for a refresh.
+                # Include every currently active channel immediately (including already-known ones).
                 c.execute('UPDATE channels SET selected=1 WHERE source_id=? AND is_active=1', (sid,))
-                next_number = c.execute('SELECT COALESCE(MAX(channel_number),0) FROM channels WHERE selected=1 AND is_active=1').fetchone()[0]
-                for row in c.execute('SELECT id FROM channels WHERE source_id=? AND selected=1 AND is_active=1 AND channel_number IS NULL ORDER BY sort_order,id', (sid,)).fetchall():
+                next_number = c.execute('SELECT COALESCE(MAX(channel_number),0) FROM channels').fetchone()[0]
+                for channel in c.execute('''SELECT id FROM channels
+                       WHERE source_id=? AND selected=1 AND is_active=1 AND channel_number IS NULL
+                       ORDER BY sort_order,id''', (sid,)):
                     next_number += 1
-                    c.execute('UPDATE channels SET channel_number=? WHERE id=?', (next_number, row['id']))
+                    c.execute('UPDATE channels SET channel_number=? WHERE id=?', (next_number, channel['id']))
         output = await regenerate_outputs()
     return {'selection_mode': patch.selection_mode, 'output': output}
 

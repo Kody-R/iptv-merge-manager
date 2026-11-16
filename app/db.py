@@ -3,16 +3,18 @@ from __future__ import annotations
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
+import os
 from typing import Iterable
 
-DATA_DIR = Path('/app/data')
+DATA_DIR = Path(os.getenv('IPTVMM_DATA_DIR', '/app/data'))
+OUTPUT_DIR = Path(os.getenv('IPTVMM_OUTPUT_DIR', '/app/output'))
 DB_PATH = DATA_DIR / 'iptv.db'
 
 
 def ensure_dirs() -> None:
     (DATA_DIR / 'cache').mkdir(parents=True, exist_ok=True)
     (DATA_DIR / 'uploads').mkdir(parents=True, exist_ok=True)
-    Path('/app/output').mkdir(parents=True, exist_ok=True)
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
 @contextmanager
@@ -121,7 +123,7 @@ def init_db() -> None:
 
         source_cols = {r[1] for r in conn.execute('PRAGMA table_info(sources)').fetchall()}
         if 'selection_mode' not in source_cols:
-            conn.execute("ALTER TABLE sources ADD COLUMN selection_mode TEXT NOT NULL DEFAULT 'manual'")
+            conn.execute("ALTER TABLE sources ADD COLUMN selection_mode TEXT NOT NULL DEFAULT 'manual' CHECK(selection_mode IN ('manual', 'all'))")
 
         log_cols = {r[1] for r in conn.execute('PRAGMA table_info(refresh_log)').fetchall()}
         if 'peak_rss_kb' not in log_cols:
